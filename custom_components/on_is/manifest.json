@@ -1,0 +1,11 @@
+{
+  "domain": "on_is",
+  "name": "ON (Orka náttúrunnar)",
+  "codeowners": ["@hakong"],
+  "config_flow": true,
+  "documentation": "https://github.com/hakong/ha-on-is",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/hakong/ha-on-is/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
