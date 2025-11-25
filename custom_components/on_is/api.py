@@ -3,9 +3,11 @@ import asyncio
 import logging
 from typing import Optional, Dict, Any, List
 
-# Headers mimic the Android App to avoid WAF blocking
+_LOGGER = logging.getLogger(__name__)
+
+# Clean, descriptive headers
 HEADERS = {
-    "User-Agent": "is.on.charge.android v.2025.7.5 == Android-16;Pixel 7 Pro;SDK:36",
+    "User-Agent": "HomeAssistant-OnIsIntegration",
     "Accept": "application/json",
 }
 
@@ -17,7 +19,6 @@ class OnIsClient:
         self._password = password
         self._session = session if session else aiohttp.ClientSession()
         self._access_token = None
-        self._token_expires = None
 
     async def close(self):
         if self._session and not self._session.closed:
@@ -27,21 +28,27 @@ class OnIsClient:
         """Exchanges credentials for a Bearer token."""
         url = f"{BASE_URL}/login"
         
-        # Note: The logs show Content-Type is x-www-form-urlencoded
+        # aiohttp automatically sets Content-Type: application/x-www-form-urlencoded 
+        # when passing a dict to 'data'
         payload = {
             "email": self._email,
             "password": self._password,
             "grant_type": "password"
         }
         
-        async with self._session.post(url, data=payload, headers=HEADERS) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise Exception(f"Login failed: {resp.status} - {text}")
-            
-            data = await resp.json()
-            self._access_token = data.get("access_token")
-            return self._access_token
+        try:
+            async with self._session.post(url, data=payload, headers=HEADERS) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    _LOGGER.error(f"Login failed: {resp.status} - {text}")
+                    raise Exception(f"Login failed: {resp.status}")
+                
+                data = await resp.json()
+                self._access_token = data.get("access_token")
+                return self._access_token
+        except Exception as e:
+            _LOGGER.error(f"Error connecting to ON API: {e}")
+            raise
 
     async def _get_headers(self):
         if not self._access_token:
@@ -63,7 +70,7 @@ class OnIsClient:
         
         async with self._session.get(url, headers=headers) as resp:
             if resp.status == 401:
-                # Token expired, retry once
+                _LOGGER.info("Token expired, refreshing...")
                 await self.login()
                 headers = await self._get_headers()
                 async with self._session.get(url, headers=headers) as resp_retry:
@@ -73,10 +80,10 @@ class OnIsClient:
 
     async def _parse_online_data(self, resp) -> List[Dict[str, Any]]:
         if resp.status != 200:
+            _LOGGER.warning(f"Failed to fetch online data: {resp.status}")
             return []
         
         data = await resp.json()
-        # The relevant data is inside the 'CurrentSessions' list
         return data.get("CurrentSessions", [])
 
     async def start_charging(self, evse_code: str, connector_id: int):
@@ -93,7 +100,6 @@ class OnIsClient:
         
         async with self._session.post(url, json=payload, headers=headers) as resp:
             data = await resp.json()
-            # ResultCode 1 means success
             if data.get("IsSuccessful") is True:
                 return True
             raise Exception(f"Start failed: {data.get('ErrorDescription')}")
