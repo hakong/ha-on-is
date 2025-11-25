@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
@@ -14,6 +15,8 @@ from .const import DOMAIN
 from .coordinator import OnIsCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+STICKY_TIMEOUT = 30 
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -31,19 +34,28 @@ async def async_setup_entry(
 
 
 class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to Start/Stop charging."""
+    """Switch to Start/Stop charging with Optimistic State."""
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator)
         self.connector_id = connector_id
         
+        self._override_state = None
+        self._override_timestamp = 0
+        
         loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
-        self._attr_name = f"ON {loc_name} Control"
+        cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
+
+        if cp_code:
+            self._attr_name = f"ON {loc_name} ({cp_code}) Control"
+        else:
+            self._attr_name = f"ON {loc_name} Control"
+
         self._attr_unique_id = f"on_is_{connector_id}_switch"
         self._attr_icon = "mdi:ev-plug-type2"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(connector_id))},
-            "name": loc_name,
+            "name": f"{loc_name} ({cp_code})" if cp_code else loc_name,
         }
 
     @property
@@ -57,14 +69,43 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return true if charging."""
+        """Return true if a charging session is active (authorized)."""
+        
+        # 1. CHECK OPTIMISTIC (STICKY) STATE
+        if self._override_state is not None:
+            if time.time() - self._override_timestamp < STICKY_TIMEOUT:
+                return self._override_state
+            else:
+                self._override_state = None
+        
+        # 2. CHECK REAL DATA
         if not self.session_data:
             return False
         
-        status = self.session_data.get("Connector", {}).get("Status", {}).get("Title", "").lower()
-        # 'charging' is obviously on. 'occupied' usually means plugged in but idle.
-        # 'suspended evse' or 'suspended ev' means stopped.
-        return status == "charging"
+        # CRITICAL LOGIC CHANGE:
+        # If the API returns a ChargingSession ID, the transaction is OPEN.
+        # This is true even if the car is paused (0 kW) or "suspended".
+        session_info = self.session_data.get("ChargingSession", {})
+        if session_info.get("Id"):
+            return True
+            
+        # Fallback Logic (just in case Session ID is missing but power is flowing)
+        status_raw = self.session_data.get("Connector", {}).get("Status", {}).get("Title", "")
+        status = str(status_raw).lower().strip()
+        
+        if status == "charging":
+            return True
+
+        # Safety catch: if power is flowing, it's definitely on.
+        measurements = self.session_data.get("Measurements", {})
+        power_raw = measurements.get("Power", 0)
+        try:
+            if float(power_raw) > 0.01:
+                return True
+        except (ValueError, TypeError):
+            pass
+            
+        return False
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Start charging."""
@@ -75,9 +116,11 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         evse_code = self._get_evse_code()
         conn_id = self.connector_id
         
-        _LOGGER.debug(f"Sending Start Command: EvseCode={evse_code}, ConnectorId={conn_id}")
-        
         await self.coordinator.client.start_charging(evse_code, conn_id)
+        
+        self._override_state = True
+        self._override_timestamp = time.time()
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
@@ -89,16 +132,20 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         cp_id = self.session_data.get("ChargePoint", {}).get("Id")
         conn_id = self.connector_id
 
-        _LOGGER.debug(f"Sending Stop Command: EvseCode={evse_code}, CP={cp_id}, Conn={conn_id}")
-
         await self.coordinator.client.stop_charging(evse_code, cp_id, conn_id)
+
+        self._override_state = False
+        self._override_timestamp = time.time()
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     def _get_evse_code(self) -> str:
         """Constructs the EvseCode required for commands."""
-        # Formula based on logs: ChargePointCode-EvseFriendlyCode-ConnectorCode
-        # Example: IS*ONP00281-3806-1-1
-        
+        # Method 1: Try direct property (from passive data)
+        if "EvseCode" in self.session_data.get("Connector", {}):
+            return self.session_data["Connector"]["EvseCode"]
+
+        # Method 2: Reconstruct (from active data)
         cp_code = self.session_data.get("ChargePoint", {}).get("FriendlyCode")
         evse_code = self.session_data.get("Evse", {}).get("FriendlyCode")
         conn_code = self.session_data.get("Connector", {}).get("Code")

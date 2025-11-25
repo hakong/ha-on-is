@@ -48,15 +48,24 @@ class OnIsBaseSensor(CoordinatorEntity):
         super().__init__(coordinator)
         self.connector_id = connector_id
         
-        # Naming: ON Charger {Location} {ConnectorID}
+        # Get Location Name
         loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
-        self._attr_name = f"ON {loc_name}"
+        
+        # Get specific Charger ID (e.g. "3806") to distinguish neighbors
+        cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
+        
+        # New Name Format: "ON Urriðaholtsstræti 30... (3806)"
+        if cp_code:
+            self._attr_name = f"ON {loc_name} ({cp_code})"
+        else:
+            self._attr_name = f"ON {loc_name}"
+
         self._attr_unique_id = f"on_is_{connector_id}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(connector_id))},
-            "name": loc_name,
+            "name": f"{loc_name} ({cp_code})" if cp_code else loc_name,
             "manufacturer": "Etrel / ON",
-            "model": session.get("ChargePoint", {}).get("FriendlyCode", "EV Charger"),
+            "model": cp_code or "EV Charger",
         }
 
     @property

@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to ON",
+        "description": "Enter your credentials. Optionally provide your Home Charger QR Code to enable status detection when not charging.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "evse_code": "Home Charger QR Code (e.g. IS*ONP...)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "invalid_auth": "Invalid authentication",
+      "invalid_evse_code": "Could not find a charger with this QR Code."
+    }
+  }
+}
