@@ -1,7 +1,9 @@
 import asyncio
 import os
 import sys
-from custom_components.on_is.api import OnIsClient  # Assumes you renamed on_is_client.py to api.py
+sys.path.append(os.path.abspath("custom_components/on_is"))
+
+from api import OnIsClient
 
 # Get credentials from Environment Variables
 EMAIL = os.getenv("ON_IS_EMAIL")
