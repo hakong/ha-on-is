@@ -43,7 +43,6 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         self._override_state = None
         self._override_timestamp = 0
         
-        # --- NEW NAMING LOGIC ---
         cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
         
         if cp_code:
@@ -52,7 +51,7 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
             loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
             base_name = f"ON {loc_name}"
 
-        self._attr_name = f"{base_name} Control"
+        self._attr_name = f"{base_name} Charging"
         self._attr_unique_id = f"on_is_{connector_id}_switch"
         self._attr_icon = "mdi:ev-plug-type2"
         self._attr_device_info = {
