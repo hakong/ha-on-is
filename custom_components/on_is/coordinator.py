@@ -74,12 +74,28 @@ class OnIsCoordinator(DataUpdateCoordinator):
         """Fetch status for a specific location ID and merge into data_map."""
         passive_data = await self.client.get_location_status(loc_id)
         
+        # Get the target code if configured
+        target_code = self.entry.data.get(CONF_EVSE_CODE)
+        
         for conn_id, fake_session in passive_data.items():
-            status = fake_session.get("Connector", {}).get("Status", {}).get("Title", "").lower()
+            should_add = False
             
-            # We are interested in anything that isn't just "Available" or "Faulted"
-            if status in ["occupied", "preparing", "suspended ev", "suspended evse", "charging"]:
-                # Only add if not already present from the Active Session list
+            # Check if this connector matches our configured QR Code
+            # If so, we ALWAYS add it, even if 'available'
+            if target_code:
+                current_code = self._extract_evse_code(fake_session)
+                if current_code == target_code:
+                    should_add = True
+            
+            # If we don't have a target code, or it didn't match, use the old logic
+            # (only add if active/occupied)
+            if not should_add:
+                status = fake_session.get("Connector", {}).get("Status", {}).get("Title", "").lower()
+                if status in ["occupied", "preparing", "suspended ev", "suspended evse", "charging"]:
+                    should_add = True
+            
+            # Only add if not already present from the Active Session list
+            if should_add:
                 if conn_id not in data_map:
                     data_map[conn_id] = fake_session
 
