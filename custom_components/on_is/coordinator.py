@@ -30,7 +30,6 @@ class OnIsCoordinator(DataUpdateCoordinator):
         self.client = client
         self.entry = entry
         self._poll_count = 0 
-        # Cache for history data {connector_id: history_dict}
         self._cached_history = {}
 
     async def _async_update_data(self):
@@ -45,22 +44,22 @@ class OnIsCoordinator(DataUpdateCoordinator):
                 if conn_id:
                     data_map[conn_id] = session
 
-            # 2. Fetch Passive Status (Home Location)
+            # 2. Fetch & Merge Passive Status (Home Location)
+            # We now do this ALWAYS if a location is configured, to get Price/Tariffs
             config_id = self.entry.data.get(CONF_LOCATION_ID)
             if config_id:
                 try:
-                    await self._check_specific_location(int(config_id), data_map)
+                    await self._merge_specific_location(int(config_id), data_map)
                 except Exception as e:
                     _LOGGER.warning(f"Error checking home location {config_id}: {e}")
 
-            # 3. Update History Cache (Every 10th poll, or approx 5 mins)
+            # 3. Update History Cache (Every 10th poll)
             if self._poll_count % 10 == 0:
                 await self._refresh_history_cache()
             
             self._poll_count += 1
 
-            # 4. Inject Cached History into Current Session Data
-            # We do this EVERY poll so the sensors don't go 'Unknown'
+            # 4. Inject History
             for conn_id, session in data_map.items():
                 if conn_id in self._cached_history:
                     session["LastSessionData"] = self._cached_history[conn_id]
@@ -84,41 +83,55 @@ class OnIsCoordinator(DataUpdateCoordinator):
         """Fetch history and update the cache."""
         try:
             history = await self.client.get_charging_history(limit=10)
-            
-            # Process history items and map them to Connector IDs
             for item in history:
                 h_conn_id = item.get("Connector", {}).get("Id")
-                
-                # Only store the most recent session for each connector
-                # Since the API returns sorted by date desc, the first one we see is the newest
                 if h_conn_id and h_conn_id not in self._cached_history:
                     self._cached_history[h_conn_id] = item
-                    # If we want to be smarter, we could check timestamps, 
-                    # but the list order is usually reliable.
-            
-            # Clear cache for IDs that weren't found? 
-            # No, better to keep old history than show nothing if API fails temporarily.
-
         except Exception as e:
             _LOGGER.warning(f"Failed to update history: {e}")
 
-    async def _check_specific_location(self, loc_id: int, data_map: dict):
+    async def _merge_specific_location(self, loc_id: int, data_map: dict):
+        """Fetch static location data and merge it into the active sessions."""
         passive_data = await self.client.get_location_status(loc_id)
+        
         target_code = self.entry.data.get(CONF_EVSE_CODE)
         
-        for conn_id, fake_session in passive_data.items():
-            should_add = False
-            if target_code:
-                if self._extract_evse_code(fake_session) == target_code:
-                    should_add = True
+        for conn_id, passive_session in passive_data.items():
             
-            if not should_add:
-                status = fake_session.get("Connector", {}).get("Status", {}).get("Title", "").lower()
-                if status in ["occupied", "preparing", "suspended ev", "suspended evse", "charging"]:
-                    should_add = True
-            
-            if should_add and conn_id not in data_map:
-                data_map[conn_id] = fake_session
+            # CASE A: This charger is currently Active (in data_map)
+            # We need to inject the Tariff/Price info from the passive data
+            if conn_id in data_map:
+                active_session = data_map[conn_id]
+                
+                # Merge Connector data (Tariffs usually live here)
+                if "Connector" in passive_session:
+                    p_conn = passive_session["Connector"]
+                    a_conn = active_session.setdefault("Connector", {})
+                    
+                    # Copy Tariffs if missing in Active
+                    if "Tariffs" in p_conn and "Tariffs" not in a_conn:
+                        a_conn["Tariffs"] = p_conn["Tariffs"]
+                        
+                    # Copy Phases if Active reports 0
+                    p_phases = p_conn.get("NumberOfPhases")
+                    a_phases = a_conn.get("NumberOfPhases")
+                    if p_phases and (not a_phases or a_phases == 0):
+                        a_conn["NumberOfPhases"] = p_phases
+
+            # CASE B: This charger is Idle (not in data_map)
+            # We add it if it matches our target or is Occupied/Preparing
+            else:
+                should_add = False
+                if target_code:
+                    if self._extract_evse_code(passive_session) == target_code:
+                        should_add = True
+                else:
+                    status = passive_session.get("Connector", {}).get("Status", {}).get("Title", "").lower()
+                    if status in ["occupied", "preparing", "suspended ev", "suspended evse", "charging"]:
+                        should_add = True
+                
+                if should_add:
+                    data_map[conn_id] = passive_session
 
     def _extract_evse_code(self, session: dict) -> str:
         if "EvseCode" in session.get("Connector", {}):
