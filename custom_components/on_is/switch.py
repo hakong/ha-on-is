@@ -44,6 +44,9 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         self._override_timestamp = 0
         
         cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
+        # Fix for Active API returning long code "IS*ONP...-3806"
+        if cp_code and "-" in cp_code:
+            cp_code = cp_code.split("-")[-1]
         
         if cp_code:
             base_name = f"ON Charger {cp_code}"
