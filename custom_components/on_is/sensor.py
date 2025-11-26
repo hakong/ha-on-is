@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 
 from homeassistant.components.sensor import (
@@ -29,11 +30,8 @@ async def async_setup_entry(
     coordinator: OnIsCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-
-    # 1. Global Session Count
     entities.append(OnIsSessionCount(coordinator))
 
-    # 2. Per-Charger Sensors
     for connector_id, session in coordinator.data.items():
         entities.extend([
             OnIsStatusSensor(coordinator, connector_id, session),
@@ -54,31 +52,40 @@ class OnIsBaseSensor(CoordinatorEntity):
         super().__init__(coordinator)
         self.connector_id = connector_id
         
-        loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
+        # --- NEW NAMING LOGIC ---
         cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
-
-        # Naming
+        
         if cp_code:
-            self._attr_name = f"ON {loc_name} ({cp_code})"
+            # Short and sweet: "ON Charger 3806"
+            base_name = f"ON Charger {cp_code}"
         else:
-            self._attr_name = f"ON {loc_name}"
+            # Fallback for weird edge cases
+            loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
+            base_name = f"ON {loc_name}"
 
+        self._attr_name = base_name
         self._attr_unique_id = f"on_is_{connector_id}"
         
-        # Technical Attributes
+        # --- FIXED PHASES LOGIC ---
+        # 1. Try Connector (Reliable in Passive Data)
+        phases = session.get("Connector", {}).get("NumberOfPhases")
+        # 2. Try Evse (Reliable in Active Data)
+        if not phases or phases == 0:
+            phases = session.get("Evse", {}).get("NumberOfPhases")
+            
         evse = session.get("Evse", {})
         conn = session.get("Connector", {})
         
         self._attr_extra_state_attributes = {
             "max_power_kw": evse.get("MaxPower"),
-            "phases": evse.get("NumberOfPhases"),
+            "phases": phases,
             "connector_type": conn.get("Type", {}).get("Title"),
             "evse_id": evse.get("Id"),
         }
 
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(connector_id))},
-            "name": f"{loc_name} ({cp_code})" if cp_code else loc_name,
+            "name": base_name,
             "manufacturer": "Etrel / ON",
             "model": cp_code or "EV Charger",
             "sw_version": "Ocean API",
@@ -158,7 +165,6 @@ class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity):
     def native_value(self):
         if not self.session_data:
             return None
-        # Format: "2025-11-24T11:51:41.16Z"
         ts = self.session_data.get("LastCommunicationTime")
         if ts:
             try:
@@ -181,11 +187,8 @@ class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):
     def native_value(self):
         if not self.session_data:
             return None
-        
-        # Try ChargingSession (Active)
         session = self.session_data.get("ChargingSession", {})
         ts = session.get("ConnectedFrom") or session.get("ChargingFrom")
-        
         if ts:
              try:
                 return datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -195,12 +198,11 @@ class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):
         
     @property
     def available(self) -> bool:
-        # Only available if plugged in and we have a timestamp
         return super().available and self.native_value is not None
 
 
 class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
-    """Price per kWh extracted from Tariff structure."""
+    """Price per kWh."""
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "ISK/kWh"
     _attr_icon = "mdi:currency-kzt"
@@ -214,31 +216,12 @@ class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
     def native_value(self):
         if not self.session_data:
             return None
-            
         try:
-            # Navigate deep into the tariff structure
-            # Connector -> Tariffs[0] -> Powers[0] -> Times[0] -> Prices[0] -> PricePerUnit
             tariffs = self.session_data.get("Connector", {}).get("Tariffs", [])
-            if not tariffs:
-                return None
-            
-            powers = tariffs[0].get("Powers", [])
-            if not powers:
-                return None
-                
-            times = powers[0].get("Times", [])
-            if not times:
-                return None
-                
-            prices = times[0].get("Prices", [])
-            if not prices:
-                return None
-                
-            return prices[0].get("PricePerUnit")
-            
+            if tariffs:
+                return tariffs[0].get("Powers", [])[0].get("Times", [])[0].get("Prices", [])[0].get("PricePerUnit")
         except Exception:
             pass
-            
         return None
 
 
