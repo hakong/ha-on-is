@@ -30,7 +30,6 @@ async def async_setup_entry(
     coordinator: OnIsCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-    entities.append(OnIsSessionCount(coordinator))
 
     for connector_id, session in coordinator.data.items():
         entities.extend([
@@ -338,17 +337,3 @@ class OnIsLastSessionDurationSensor(OnIsBaseSensor, SensorEntity):
                 "total_hours": round(diff.total_seconds() / 3600, 2)
             }
         return {}
-
-
-class OnIsSessionCount(CoordinatorEntity, SensorEntity):
-    """Global active session counter."""
-    _attr_name = "ON Active Sessions"
-    _attr_icon = "mdi:car-electric"
-    _attr_unique_id = "on_is_active_sessions"
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator)
-
-    @property
-    def native_value(self):
-        return len(self.coordinator.data)
