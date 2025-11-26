@@ -4,7 +4,7 @@ Unofficial Home Assistant integration for the Icelandic [ON (Orka náttúrunnar)
 
 Built for the **Etrel OCEAN** white-label platform.
 
-<img src="images/dashboard.png" width="600" alt="Home Assistant Dashboard Screenshot">
+<img src="https://github.com/hakong/ha-on-is/blob/main/images/dashboard.png?raw=true" width="600" alt="Home Assistant Dashboard Screenshot">
 
 ## Features
 *   **Home Charging:** Monitors your specific home charger status (Available, Preparing, Charging) even when idle.
