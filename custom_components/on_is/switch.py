@@ -16,7 +16,7 @@ from .coordinator import OnIsCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-STICKY_TIMEOUT = 30 
+STICKY_TIMEOUT = 180
 
 async def async_setup_entry(
     hass: HomeAssistant,
