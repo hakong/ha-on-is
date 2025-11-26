@@ -40,6 +40,10 @@ async def async_setup_entry(
             OnIsLastCommSensor(coordinator, connector_id, session),
             OnIsSessionStartSensor(coordinator, connector_id, session),
             OnIsPriceSensor(coordinator, connector_id, session),
+            OnIsLastSessionCostSensor(coordinator, connector_id, session),
+            OnIsLastSessionEnergySensor(coordinator, connector_id, session),
+            OnIsLastSessionTimeSensor(coordinator, connector_id, session),
+            OnIsLastSessionDurationSensor(coordinator, connector_id, session),
         ])
 
     async_add_entities(entities)
@@ -52,36 +56,18 @@ class OnIsBaseSensor(CoordinatorEntity):
         super().__init__(coordinator)
         self.connector_id = connector_id
         
-        # --- NEW NAMING LOGIC ---
         cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
-        
         if cp_code:
-            # Short and sweet: "ON Charger 3806"
             base_name = f"ON Charger {cp_code}"
         else:
-            # Fallback for weird edge cases
             loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
             base_name = f"ON {loc_name}"
 
         self._attr_name = base_name
         self._attr_unique_id = f"on_is_{connector_id}"
         
-        # --- FIXED PHASES LOGIC ---
-        # 1. Try Connector (Reliable in Passive Data)
-        phases = session.get("Connector", {}).get("NumberOfPhases")
-        # 2. Try Evse (Reliable in Active Data)
-        if not phases or phases == 0:
-            phases = session.get("Evse", {}).get("NumberOfPhases")
-            
-        evse = session.get("Evse", {})
-        conn = session.get("Connector", {})
-        
-        self._attr_extra_state_attributes = {
-            "max_power_kw": evse.get("MaxPower"),
-            "phases": phases,
-            "connector_type": conn.get("Type", {}).get("Title"),
-            "evse_id": evse.get("Id"),
-        }
+        # REMOVED attributes from here to clean up other sensors.
+        # They are now only in OnIsStatusSensor.
 
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(connector_id))},
@@ -113,6 +99,27 @@ class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
         if not self.session_data:
             return "Disconnected"
         return self.session_data.get("Connector", {}).get("Status", {}).get("Title", "Unknown")
+
+    @property
+    def extra_state_attributes(self):
+        """Return technical details only on the Status sensor."""
+        if not self.session_data:
+            return {}
+
+        # Logic to find phases in either Active or Passive data
+        phases = self.session_data.get("Connector", {}).get("NumberOfPhases")
+        if not phases or phases == 0:
+            phases = self.session_data.get("Evse", {}).get("NumberOfPhases")
+            
+        evse = self.session_data.get("Evse", {})
+        conn = self.session_data.get("Connector", {})
+        
+        return {
+            "max_power_kw": evse.get("MaxPower"),
+            "phases": phases,
+            "connector_type": conn.get("Type", {}).get("Title"),
+            "evse_id": evse.get("Id"),
+        }
 
 
 class OnIsPowerSensor(OnIsBaseSensor, SensorEntity):
@@ -223,6 +230,114 @@ class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
         except Exception:
             pass
         return None
+
+
+class OnIsLastSessionCostSensor(OnIsBaseSensor, SensorEntity):
+    """Cost of the last completed session."""
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = "ISK"
+    _attr_icon = "mdi:cash"
+
+    def __init__(self, coordinator, connector_id, session):
+        super().__init__(coordinator, connector_id, session)
+        self._attr_name = f"{super().name} Last Session Cost"
+        self._attr_unique_id = f"{super().unique_id}_last_cost"
+
+    @property
+    def native_value(self):
+        if not self.session_data:
+            return None
+        hist = self.session_data.get("LastSessionData", {})
+        return hist.get("TotalCosts")
+
+
+class OnIsLastSessionEnergySensor(OnIsBaseSensor, SensorEntity):
+    """Energy delivered in the last completed session."""
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_state_class = SensorStateClass.TOTAL
+
+    def __init__(self, coordinator, connector_id, session):
+        super().__init__(coordinator, connector_id, session)
+        self._attr_name = f"{super().name} Last Session Energy"
+        self._attr_unique_id = f"{super().unique_id}_last_energy"
+
+    @property
+    def native_value(self):
+        if not self.session_data:
+            return None
+        hist = self.session_data.get("LastSessionData", {})
+        return hist.get("ActiveEnergyConsumption")
+
+
+class OnIsLastSessionTimeSensor(OnIsBaseSensor, SensorEntity):
+    """End time of the last completed session."""
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator, connector_id, session):
+        super().__init__(coordinator, connector_id, session)
+        self._attr_name = f"{super().name} Last Session End"
+        self._attr_unique_id = f"{super().unique_id}_last_end"
+
+    @property
+    def native_value(self):
+        if not self.session_data:
+            return None
+        hist = self.session_data.get("LastSessionData", {})
+        ts = hist.get("ChargingTo") or hist.get("ConnectedTo")
+        if ts:
+             try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+             except ValueError:
+                return None
+        return None
+
+
+class OnIsLastSessionDurationSensor(OnIsBaseSensor, SensorEntity):
+    """Duration of the last completed session."""
+    _attr_icon = "mdi:timer-outline"
+
+    def __init__(self, coordinator, connector_id, session):
+        super().__init__(coordinator, connector_id, session)
+        self._attr_name = f"{super().name} Last Session Duration"
+        self._attr_unique_id = f"{super().unique_id}_last_duration"
+
+    def _get_diff(self):
+        if not self.session_data:
+            return None
+        hist = self.session_data.get("LastSessionData", {})
+        start_str = hist.get("ConnectedFrom")
+        end_str = hist.get("ConnectedTo")
+        if start_str and end_str:
+            try:
+                start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                return end - start
+            except ValueError:
+                pass
+        return None
+
+    @property
+    def native_value(self):
+        diff = self._get_diff()
+        if diff:
+            total_minutes = int(diff.total_seconds() / 60)
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
+            return f"{hours}h {minutes}m"
+        return None
+
+    @property
+    def extra_state_attributes(self):
+        """Return raw numbers for automation/templating."""
+        diff = self._get_diff()
+        if diff:
+            return {
+                "total_seconds": int(diff.total_seconds()),
+                "total_minutes": int(diff.total_seconds() / 60),
+                "total_hours": round(diff.total_seconds() / 3600, 2)
+            }
+        return {}
 
 
 class OnIsSessionCount(CoordinatorEntity, SensorEntity):

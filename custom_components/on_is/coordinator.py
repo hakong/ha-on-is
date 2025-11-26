@@ -29,6 +29,9 @@ class OnIsCoordinator(DataUpdateCoordinator):
         )
         self.client = client
         self.entry = entry
+        self._poll_count = 0 
+        # Cache for history data {connector_id: history_dict}
+        self._cached_history = {}
 
     async def _async_update_data(self):
         """Fetch data from API endpoint."""
@@ -42,7 +45,7 @@ class OnIsCoordinator(DataUpdateCoordinator):
                 if conn_id:
                     data_map[conn_id] = session
 
-            # 2. Fetch Passive Status (ONLY for the configured Home Location)
+            # 2. Fetch Passive Status (Home Location)
             config_id = self.entry.data.get(CONF_LOCATION_ID)
             if config_id:
                 try:
@@ -50,19 +53,26 @@ class OnIsCoordinator(DataUpdateCoordinator):
                 except Exception as e:
                     _LOGGER.warning(f"Error checking home location {config_id}: {e}")
 
-            # 3. Filter Results
-            target_code = self.entry.data.get(CONF_EVSE_CODE)
+            # 3. Update History Cache (Every 10th poll, or approx 5 mins)
+            if self._poll_count % 10 == 0:
+                await self._refresh_history_cache()
             
+            self._poll_count += 1
+
+            # 4. Inject Cached History into Current Session Data
+            # We do this EVERY poll so the sensors don't go 'Unknown'
+            for conn_id, session in data_map.items():
+                if conn_id in self._cached_history:
+                    session["LastSessionData"] = self._cached_history[conn_id]
+
+            # 5. Filter Results
+            target_code = self.entry.data.get(CONF_EVSE_CODE)
             if target_code and data_map:
                 filtered_map = {}
                 for conn_id, session in data_map.items():
                     current_code = self._extract_evse_code(session)
-                    
                     if current_code == target_code:
                         filtered_map[conn_id] = session
-                    else:
-                        _LOGGER.debug(f"Ignoring device {current_code} (Not {target_code})")
-                
                 return filtered_map
             
             return data_map
@@ -70,42 +80,49 @@ class OnIsCoordinator(DataUpdateCoordinator):
         except Exception as err:
             raise UpdateFailed(f"Error communicating with API: {err}")
 
+    async def _refresh_history_cache(self):
+        """Fetch history and update the cache."""
+        try:
+            history = await self.client.get_charging_history(limit=10)
+            
+            # Process history items and map them to Connector IDs
+            for item in history:
+                h_conn_id = item.get("Connector", {}).get("Id")
+                
+                # Only store the most recent session for each connector
+                # Since the API returns sorted by date desc, the first one we see is the newest
+                if h_conn_id and h_conn_id not in self._cached_history:
+                    self._cached_history[h_conn_id] = item
+                    # If we want to be smarter, we could check timestamps, 
+                    # but the list order is usually reliable.
+            
+            # Clear cache for IDs that weren't found? 
+            # No, better to keep old history than show nothing if API fails temporarily.
+
+        except Exception as e:
+            _LOGGER.warning(f"Failed to update history: {e}")
+
     async def _check_specific_location(self, loc_id: int, data_map: dict):
-        """Fetch status for a specific location ID and merge into data_map."""
         passive_data = await self.client.get_location_status(loc_id)
-        
-        # Get the target code if configured
         target_code = self.entry.data.get(CONF_EVSE_CODE)
         
         for conn_id, fake_session in passive_data.items():
             should_add = False
-            
-            # Check if this connector matches our configured QR Code
-            # If so, we ALWAYS add it, even if 'available'
             if target_code:
-                current_code = self._extract_evse_code(fake_session)
-                if current_code == target_code:
+                if self._extract_evse_code(fake_session) == target_code:
                     should_add = True
             
-            # If we don't have a target code, or it didn't match, use the old logic
-            # (only add if active/occupied)
             if not should_add:
                 status = fake_session.get("Connector", {}).get("Status", {}).get("Title", "").lower()
                 if status in ["occupied", "preparing", "suspended ev", "suspended evse", "charging"]:
                     should_add = True
             
-            # Only add if not already present from the Active Session list
-            if should_add:
-                if conn_id not in data_map:
-                    data_map[conn_id] = fake_session
+            if should_add and conn_id not in data_map:
+                data_map[conn_id] = fake_session
 
     def _extract_evse_code(self, session: dict) -> str:
-        """Find the EVSE Code from either Active or Passive data."""
-        # Method 1: Passive data usually has it directly
         if "EvseCode" in session.get("Connector", {}):
             return session["Connector"]["EvseCode"]
-            
-        # Method 2: Active data requires reconstruction
         try:
             cp_code = session.get("ChargePoint", {}).get("FriendlyCode")
             evse_code = session.get("Evse", {}).get("FriendlyCode")

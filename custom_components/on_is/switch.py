@@ -43,19 +43,21 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         self._override_state = None
         self._override_timestamp = 0
         
-        loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
+        # --- NEW NAMING LOGIC ---
         cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
-
+        
         if cp_code:
-            self._attr_name = f"ON {loc_name} ({cp_code}) Control"
+            base_name = f"ON Charger {cp_code}"
         else:
-            self._attr_name = f"ON {loc_name} Control"
+            loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
+            base_name = f"ON {loc_name}"
 
+        self._attr_name = f"{base_name} Control"
         self._attr_unique_id = f"on_is_{connector_id}_switch"
         self._attr_icon = "mdi:ev-plug-type2"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(connector_id))},
-            "name": f"{loc_name} ({cp_code})" if cp_code else loc_name,
+            "name": base_name,
         }
 
     @property
@@ -64,39 +66,32 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        """Switch is only available if car is plugged in."""
         return self.session_data is not None
 
     @property
     def is_on(self) -> bool:
         """Return true if a charging session is active (authorized)."""
-        
-        # 1. CHECK OPTIMISTIC (STICKY) STATE
         if self._override_state is not None:
             if time.time() - self._override_timestamp < STICKY_TIMEOUT:
                 return self._override_state
             else:
                 self._override_state = None
         
-        # 2. CHECK REAL DATA
         if not self.session_data:
             return False
         
-        # CRITICAL LOGIC CHANGE:
-        # If the API returns a ChargingSession ID, the transaction is OPEN.
-        # This is true even if the car is paused (0 kW) or "suspended".
+        # Check for Active Session ID
         session_info = self.session_data.get("ChargingSession", {})
         if session_info.get("Id"):
             return True
             
-        # Fallback Logic (just in case Session ID is missing but power is flowing)
+        # Fallback Logic
         status_raw = self.session_data.get("Connector", {}).get("Status", {}).get("Title", "")
         status = str(status_raw).lower().strip()
         
         if status == "charging":
             return True
 
-        # Safety catch: if power is flowing, it's definitely on.
         measurements = self.session_data.get("Measurements", {})
         power_raw = measurements.get("Power", 0)
         try:
@@ -140,12 +135,9 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         await self.coordinator.async_request_refresh()
 
     def _get_evse_code(self) -> str:
-        """Constructs the EvseCode required for commands."""
-        # Method 1: Try direct property (from passive data)
         if "EvseCode" in self.session_data.get("Connector", {}):
             return self.session_data["Connector"]["EvseCode"]
 
-        # Method 2: Reconstruct (from active data)
         cp_code = self.session_data.get("ChargePoint", {}).get("FriendlyCode")
         evse_code = self.session_data.get("Evse", {}).get("FriendlyCode")
         conn_code = self.session_data.get("Connector", {}).get("Code")

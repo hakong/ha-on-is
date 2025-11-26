@@ -165,3 +165,19 @@ class OnIsClient:
             _LOGGER.error(f"Error resolving EVSE code: {e}")
         
         return None
+
+    async def get_charging_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+            """Fetch recent charging sessions."""
+            # Fetching page 1 with a small size is enough to find the recent one
+            url = f"{BASE_URL}/api/chargingSessions?pageSize={limit}&pageNumber=1"
+            headers = await self._get_headers()
+            
+            try:
+                async with self._session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("Content", [])
+            except Exception as e:
+                _LOGGER.error(f"Error fetching history: {e}")
+                
+            return []
