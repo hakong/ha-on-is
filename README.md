@@ -5,9 +5,11 @@ Unofficial Home Assistant integration for the Icelandic [ON (Orka náttúrunnar)
 Built for the **Etrel OCEAN** white-label platform.
 
 ## Features
-*   **Monitoring:** Live Power (kW), Energy Added (kWh), and Charger Status.
-*   **Control:** Start and Stop charging sessions remotely.
-*   **Dynamic:** Entities appear automatically when a car is plugged in.
+*   **Home Charging:** Monitors your specific home charger status (Available, Preparing, Charging) even when idle.
+*   **Live Monitoring:** Real-time Power (kW), Energy (kWh), and Price (ISK/kWh).
+*   **History:** Tracks Cost, Energy, and Duration of the last completed session.
+*   **Control:** Remote Start and Stop commands.
+*   **Smart Logic:** Filters out neighbor chargers in shared garages and tries to handle poor connections to EVSEs.
 
 ## Installation
 
@@ -27,7 +29,10 @@ Built for the **Etrel OCEAN** white-label platform.
 1.  Go to **Settings** > **Devices & Services**.
 2.  Click **Add Integration**.
 3.  Search for **ON (Orka náttúrunnar)**.
-4.  Enter your app email and password.
+4.  **Email / Password:** Enter your app credentials.
+5.  **Home Charger QR Code (Recommended):** Enter the code printed on your charger (e.g., `IS*ONP...`).
+    *   *Required for home chargers to appear when not charging.*
+    *   *Used to filter out neighbors in shared garages.*
 
 ## Disclaimer
 This is a reverse-engineered integration and is not affiliated with Orka náttúrunnar or Etrel. Use at your own risk.
