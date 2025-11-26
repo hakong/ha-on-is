@@ -193,19 +193,16 @@ class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):
     def native_value(self):
         if not self.session_data:
             return None
+        
         session = self.session_data.get("ChargingSession", {})
         ts = session.get("ConnectedFrom") or session.get("ChargingFrom")
+        
         if ts:
              try:
                 return datetime.fromisoformat(ts.replace("Z", "+00:00"))
              except ValueError:
                 return None
         return None
-        
-    @property
-    def available(self) -> bool:
-        return super().available and self.native_value is not None
-
 
 class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
     """Price per kWh."""

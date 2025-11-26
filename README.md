@@ -4,6 +4,8 @@ Unofficial Home Assistant integration for the Icelandic [ON (Orka náttúrunnar)
 
 Built for the **Etrel OCEAN** white-label platform.
 
+<img src="images/dashboard.png" width="600" alt="Home Assistant Dashboard Screenshot">
+
 ## Features
 *   **Home Charging:** Monitors your specific home charger status (Available, Preparing, Charging) even when idle.
 *   **Live Monitoring:** Real-time Power (kW), Energy (kWh), and Price (ISK/kWh).
