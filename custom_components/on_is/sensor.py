@@ -15,7 +15,7 @@ from homeassistant.const import UnitOfEnergy, UnitOfPower, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-import homeassistant.util.dt as dt_util  # Helper for current time
+import homeassistant.util.dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import OnIsCoordinator
@@ -31,24 +31,21 @@ async def async_setup_entry(
     coordinator: OnIsCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = []
-    # Removed Global Session Count
 
     for connector_id, session in coordinator.data.items():
         entities.extend([
             OnIsStatusSensor(coordinator, connector_id, session),
             OnIsPowerSensor(coordinator, connector_id, session),
-            OnIsEnergySensor(coordinator, connector_id, session), # Renamed internally
+            OnIsEnergySensor(coordinator, connector_id, session),
             OnIsLastCommSensor(coordinator, connector_id, session),
             OnIsSessionStartSensor(coordinator, connector_id, session),
             OnIsPriceSensor(coordinator, connector_id, session),
             
-            # History Sensors
             OnIsLastSessionCostSensor(coordinator, connector_id, session),
             OnIsLastSessionEnergySensor(coordinator, connector_id, session),
             OnIsLastSessionTimeSensor(coordinator, connector_id, session),
             OnIsLastSessionDurationSensor(coordinator, connector_id, session),
             
-            # New Live Sensors
             OnIsCurrentSessionDurationSensor(coordinator, connector_id, session),
             OnIsCurrentSessionCostSensor(coordinator, connector_id, session),
         ])
@@ -64,9 +61,10 @@ class OnIsBaseSensor(CoordinatorEntity):
         self.connector_id = connector_id
         
         cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
-        # Fix for Active API returning long code "IS*ONP...-3806"
+        # Fix for Active API returning long code
         if cp_code and "-" in cp_code:
             cp_code = cp_code.split("-")[-1]
+
         if cp_code:
             base_name = f"ON Charger {cp_code}"
         else:
@@ -94,7 +92,6 @@ class OnIsBaseSensor(CoordinatorEntity):
 
 
 class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
-    """Charging status."""
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
         self._attr_name = f"{super().name} Status"
@@ -125,7 +122,6 @@ class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
 
 
 class OnIsPowerSensor(OnIsBaseSensor, SensorEntity):
-    """Current Power (kW)."""
     _attr_device_class = SensorDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.KILO_WATT
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -143,14 +139,12 @@ class OnIsPowerSensor(OnIsBaseSensor, SensorEntity):
 
 
 class OnIsEnergySensor(OnIsBaseSensor, SensorEntity):
-    """Energy Added (kWh) during current session."""
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
-        # Renamed for clarity
         self._attr_name = f"{super().name} Current Session Energy"
         self._attr_unique_id = f"{super().unique_id}_energy"
 
@@ -162,7 +156,6 @@ class OnIsEnergySensor(OnIsBaseSensor, SensorEntity):
 
 
 class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity):
-    """Timestamp of last communication."""
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_entity_category = EntityCategory.DIAGNOSTIC 
 
@@ -198,10 +191,18 @@ class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):
         if not self.session_data:
             return None
         
+        # Priority 1: Official Billing Session Start
         session = self.session_data.get("ChargingSession", {})
-        # CHANGED PRIORITY: ChargingFrom first, then ConnectedFrom
         ts = session.get("ChargingFrom") or session.get("ConnectedFrom")
         
+        # Priority 2: Fallback to Last Status Change (e.g. "Preparing" -> "Occupied")
+        if not ts:
+            ts = self.session_data.get("LastStatusChangeTime")
+            # Only use this fallback if we are actually occupied/charging
+            status = self.session_data.get("Connector", {}).get("Status", {}).get("Title", "").lower()
+            if status not in ["occupied", "charging", "suspended ev", "suspended evse"]:
+                return None
+
         if ts:
              try:
                 return datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -211,7 +212,6 @@ class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):
 
 
 class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
-    """Price per kWh."""
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_native_unit_of_measurement = "ISK/kWh"
     _attr_icon = "mdi:currency-kzt"
@@ -226,7 +226,6 @@ class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
         if not self.session_data:
             return None
         try:
-            # Merged data from passive scan should populate this
             tariffs = self.session_data.get("Connector", {}).get("Tariffs", [])
             if tariffs:
                 return tariffs[0].get("Powers", [])[0].get("Times", [])[0].get("Prices", [])[0].get("PricePerUnit")
@@ -235,7 +234,7 @@ class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
         return None
 
 
-# --- NEW LIVE SENSORS ---
+# --- LIVE SENSORS ---
 
 class OnIsCurrentSessionDurationSensor(OnIsBaseSensor, SensorEntity):
     """Duration of the current active session."""
@@ -251,18 +250,24 @@ class OnIsCurrentSessionDurationSensor(OnIsBaseSensor, SensorEntity):
         if not self.session_data:
             return None
         
+        # Priority 1: Official Billing Session
         session = self.session_data.get("ChargingSession", {})
         start_str = session.get("ChargingFrom") or session.get("ConnectedFrom")
+        
+        # Priority 2: Fallback to Status Change
+        if not start_str:
+            status = self.session_data.get("Connector", {}).get("Status", {}).get("Title", "").lower()
+            if status in ["occupied", "charging", "suspended ev"]:
+                start_str = self.session_data.get("LastStatusChangeTime")
         
         if start_str:
             try:
                 start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                now = dt_util.utcnow() # Use HA helper for timezone safety
+                now = dt_util.utcnow()
                 
                 diff = now - start
                 total_minutes = int(diff.total_seconds() / 60)
                 
-                # Just return minutes if less than an hour
                 if total_minutes < 60:
                     return f"{total_minutes}m"
                 
@@ -275,7 +280,6 @@ class OnIsCurrentSessionDurationSensor(OnIsBaseSensor, SensorEntity):
 
 
 class OnIsCurrentSessionCostSensor(OnIsBaseSensor, SensorEntity):
-    """Calculated cost of current session."""
     _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = "ISK"
     _attr_icon = "mdi:cash"
@@ -289,27 +293,20 @@ class OnIsCurrentSessionCostSensor(OnIsBaseSensor, SensorEntity):
     def native_value(self):
         if not self.session_data:
             return None
-        
         try:
-            # 1. Get Energy
             energy = self.session_data.get("Measurements", {}).get("ActiveEnergyConsumed", 0.0)
-            
-            # 2. Get Price (Reuse logic from Price Sensor)
             tariffs = self.session_data.get("Connector", {}).get("Tariffs", [])
             price = 0.0
             if tariffs:
                 price = tariffs[0].get("Powers", [])[0].get("Times", [])[0].get("Prices", [])[0].get("PricePerUnit", 0.0)
-            
             if energy and price:
                 return round(float(energy) * float(price), 2)
-                
         except Exception:
             pass
-            
         return 0.0
 
 
-# --- HISTORY SENSORS (Keep Existing) ---
+# --- HISTORY SENSORS ---
 
 class OnIsLastSessionCostSensor(OnIsBaseSensor, SensorEntity):
     _attr_state_class = SensorStateClass.TOTAL
