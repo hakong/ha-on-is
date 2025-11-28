@@ -161,7 +161,7 @@ class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity):
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
-        self._attr_name = f"{super().name} Last Communication"
+        self._attr_name = f"{super().name} Last Communication with charger"
         self._attr_unique_id = f"{super().unique_id}_last_comm"
 
     @property
