@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone
 
 from homeassistant.components.sensor import (
@@ -11,14 +10,14 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import UnitOfEnergy, UnitOfPower, EntityCategory
+from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-import homeassistant.util.dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import OnIsCoordinator
+from .helpers import format_minutes
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,27 +29,39 @@ async def async_setup_entry(
     """Set up ON sensors."""
     coordinator: OnIsCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
+    known_connectors: set[int] = set()
 
-    for connector_id, session in coordinator.data.items():
-        entities.extend([
-            OnIsStatusSensor(coordinator, connector_id, session),
-            OnIsPowerSensor(coordinator, connector_id, session),
-            OnIsEnergySensor(coordinator, connector_id, session),
-            OnIsLastCommSensor(coordinator, connector_id, session),
-            OnIsSessionStartSensor(coordinator, connector_id, session),
-            OnIsPriceSensor(coordinator, connector_id, session),
-            
-            OnIsLastSessionCostSensor(coordinator, connector_id, session),
-            OnIsLastSessionEnergySensor(coordinator, connector_id, session),
-            OnIsLastSessionTimeSensor(coordinator, connector_id, session),
-            OnIsLastSessionDurationSensor(coordinator, connector_id, session),
-            
-            OnIsCurrentSessionDurationSensor(coordinator, connector_id, session),
-            OnIsCurrentSessionCostSensor(coordinator, connector_id, session),
-        ])
+    def add_new_entities() -> None:
+        entities = []
+        for connector_id, session in (coordinator.data or {}).items():
+            if connector_id in known_connectors:
+                continue
+            known_connectors.add(connector_id)
+            entities.extend(_build_sensor_entities(coordinator, connector_id, session))
 
-    async_add_entities(entities)
+        if entities:
+            async_add_entities(entities)
+
+    add_new_entities()
+    entry.async_on_unload(coordinator.async_add_listener(add_new_entities))
+
+
+def _build_sensor_entities(coordinator, connector_id, session):
+    """Create all sensor entities for a connector."""
+    return [
+        OnIsStatusSensor(coordinator, connector_id, session),
+        OnIsPowerSensor(coordinator, connector_id, session),
+        OnIsEnergySensor(coordinator, connector_id, session),
+        OnIsLastCommSensor(coordinator, connector_id, session),
+        OnIsSessionStartSensor(coordinator, connector_id, session),
+        OnIsPriceSensor(coordinator, connector_id, session),
+        OnIsLastSessionCostSensor(coordinator, connector_id, session),
+        OnIsLastSessionEnergySensor(coordinator, connector_id, session),
+        OnIsLastSessionTimeSensor(coordinator, connector_id, session),
+        OnIsLastSessionDurationSensor(coordinator, connector_id, session),
+        OnIsCurrentSessionDurationSensor(coordinator, connector_id, session),
+        OnIsCurrentSessionCostSensor(coordinator, connector_id, session),
+    ]
 
 
 class OnIsBaseSensor(CoordinatorEntity):
@@ -238,7 +249,10 @@ class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
 
 class OnIsCurrentSessionDurationSensor(OnIsBaseSensor, SensorEntity):
     """Duration of the current active session."""
+    _attr_device_class = SensorDeviceClass.DURATION
     _attr_icon = "mdi:timer-outline"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
@@ -263,20 +277,20 @@ class OnIsCurrentSessionDurationSensor(OnIsBaseSensor, SensorEntity):
         if start_str:
             try:
                 start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                now = dt_util.utcnow()
+                now = datetime.now(timezone.utc)
                 
                 diff = now - start
-                total_minutes = int(diff.total_seconds() / 60)
-                
-                if total_minutes < 60:
-                    return f"{total_minutes}m"
-                
-                hours = total_minutes // 60
-                minutes = total_minutes % 60
-                return f"{hours}h {minutes}m"
+                return max(0, int(diff.total_seconds() / 60))
             except ValueError:
                 pass
         return None
+
+    @property
+    def extra_state_attributes(self):
+        value = self.native_value
+        if value is None:
+            return {}
+        return {"duration": format_minutes(value)}
 
 
 class OnIsCurrentSessionCostSensor(OnIsBaseSensor, SensorEntity):
@@ -353,7 +367,11 @@ class OnIsLastSessionTimeSensor(OnIsBaseSensor, SensorEntity):
         return None
 
 class OnIsLastSessionDurationSensor(OnIsBaseSensor, SensorEntity):
+    _attr_device_class = SensorDeviceClass.DURATION
     _attr_icon = "mdi:timer-outline"
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
         self._attr_name = f"{super().name} Last Session Duration"
@@ -375,13 +393,16 @@ class OnIsLastSessionDurationSensor(OnIsBaseSensor, SensorEntity):
         diff = self._get_diff()
         if diff:
             total_minutes = int(diff.total_seconds() / 60)
-            hours = total_minutes // 60
-            minutes = total_minutes % 60
-            return f"{hours}h {minutes}m"
+            return max(0, total_minutes)
         return None
+
     @property
     def extra_state_attributes(self):
         diff = self._get_diff()
         if diff:
-            return {"total_seconds": int(diff.total_seconds()), "total_minutes": int(diff.total_seconds() / 60)}
+            total_minutes = max(0, int(diff.total_seconds() / 60))
+            return {
+                "duration": format_minutes(total_minutes),
+                "total_seconds": int(diff.total_seconds()),
+            }
         return {}

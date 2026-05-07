@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import OnIsCoordinator
+from .helpers import extract_evse_code
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,11 +27,21 @@ async def async_setup_entry(
     """Set up ON switches."""
     coordinator: OnIsCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    entities = []
-    for connector_id, session in coordinator.data.items():
-        entities.append(OnIsChargerSwitch(coordinator, connector_id, session))
+    known_connectors: set[int] = set()
 
-    async_add_entities(entities)
+    def add_new_entities() -> None:
+        entities = []
+        for connector_id, session in (coordinator.data or {}).items():
+            if connector_id in known_connectors:
+                continue
+            known_connectors.add(connector_id)
+            entities.append(OnIsChargerSwitch(coordinator, connector_id, session))
+
+        if entities:
+            async_add_entities(entities)
+
+    add_new_entities()
+    entry.async_on_unload(coordinator.async_add_listener(add_new_entities))
 
 
 class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
@@ -137,11 +148,4 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         await self.coordinator.async_request_refresh()
 
     def _get_evse_code(self) -> str:
-        if "EvseCode" in self.session_data.get("Connector", {}):
-            return self.session_data["Connector"]["EvseCode"]
-
-        cp_code = self.session_data.get("ChargePoint", {}).get("FriendlyCode")
-        evse_code = self.session_data.get("Evse", {}).get("FriendlyCode")
-        conn_code = self.session_data.get("Connector", {}).get("Code")
-        
-        return f"{cp_code}-{evse_code}-{conn_code}"
+        return extract_evse_code(self.session_data)

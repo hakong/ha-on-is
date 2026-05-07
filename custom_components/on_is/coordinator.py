@@ -13,6 +13,7 @@ from homeassistant.helpers.update_coordinator import (
 
 from .api import OnIsClient
 from .const import DOMAIN, SCAN_INTERVAL_SECONDS, CONF_LOCATION_ID, CONF_EVSE_CODE
+from .helpers import evse_codes_match, extract_evse_code
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,8 +70,7 @@ class OnIsCoordinator(DataUpdateCoordinator):
             if target_code and data_map:
                 filtered_map = {}
                 for conn_id, session in data_map.items():
-                    current_code = self._extract_evse_code(session)
-                    if current_code == target_code:
+                    if evse_codes_match(extract_evse_code(session), target_code):
                         filtered_map[conn_id] = session
                 return filtered_map
             
@@ -83,10 +83,12 @@ class OnIsCoordinator(DataUpdateCoordinator):
         """Fetch history and update the cache."""
         try:
             history = await self.client.get_charging_history(limit=10)
+            seen_connectors = set()
             for item in history:
                 h_conn_id = item.get("Connector", {}).get("Id")
-                if h_conn_id and h_conn_id not in self._cached_history:
+                if h_conn_id and h_conn_id not in seen_connectors:
                     self._cached_history[h_conn_id] = item
+                    seen_connectors.add(h_conn_id)
         except Exception as e:
             _LOGGER.warning(f"Failed to update history: {e}")
 
@@ -123,7 +125,7 @@ class OnIsCoordinator(DataUpdateCoordinator):
             else:
                 should_add = False
                 if target_code:
-                    if self._extract_evse_code(passive_session) == target_code:
+                    if evse_codes_match(extract_evse_code(passive_session), target_code):
                         should_add = True
                 else:
                     status = passive_session.get("Connector", {}).get("Status", {}).get("Title", "").lower()
@@ -132,14 +134,3 @@ class OnIsCoordinator(DataUpdateCoordinator):
                 
                 if should_add:
                     data_map[conn_id] = passive_session
-
-    def _extract_evse_code(self, session: dict) -> str:
-        if "EvseCode" in session.get("Connector", {}):
-            return session["Connector"]["EvseCode"]
-        try:
-            cp_code = session.get("ChargePoint", {}).get("FriendlyCode")
-            evse_code = session.get("Evse", {}).get("FriendlyCode")
-            conn_code = session.get("Connector", {}).get("Code")
-            return f"{cp_code}-{evse_code}-{conn_code}"
-        except Exception:
-            return "unknown"

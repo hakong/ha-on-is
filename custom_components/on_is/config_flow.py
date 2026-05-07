@@ -11,7 +11,7 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import OnIsClient
+from .api import OnIsApiError, OnIsAuthError, OnIsClient
 from .const import DOMAIN, CONF_LOCATION_ID, CONF_EVSE_CODE
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,9 +36,28 @@ class OnIsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            email = user_input[CONF_EMAIL].strip()
+            evse_input = user_input.get(CONF_EVSE_CODE)
+            if evse_input:
+                evse_input = evse_input.strip()
+
+            requested_evse = (evse_input or "").lower()
+            for existing_entry in self._async_current_entries():
+                existing_email = existing_entry.data.get(CONF_EMAIL, "").strip().lower()
+                existing_evse = existing_entry.data.get(CONF_EVSE_CODE, "")
+                existing_evse = existing_evse.strip().lower() if existing_evse else ""
+                if existing_email == email.lower() and existing_evse == requested_evse:
+                    return self.async_abort(reason="already_configured")
+
+            unique_id = email.lower()
+            if evse_input:
+                unique_id = f"{unique_id}:{requested_evse}"
+            await self.async_set_unique_id(unique_id)
+            self._abort_if_unique_id_configured()
+
             session = async_get_clientsession(self.hass)
             client = OnIsClient(
-                email=user_input[CONF_EMAIL],
+                email=email,
                 password=user_input[CONF_PASSWORD],
                 session=session,
             )
@@ -47,19 +66,16 @@ class OnIsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await client.login()
 
                 # 2. (Optional) Resolve Home Charger QR Code
-                evse_input = user_input.get(CONF_EVSE_CODE)
                 location_id = None
                 
                 if evse_input:
-                    # Clean up the input string just in case
-                    evse_input = evse_input.strip()
                     location_id = await client.resolve_evse_code(evse_input)
                     if not location_id:
                         errors["base"] = "invalid_evse_code"
                 
                 if not errors:
                     data = {
-                        CONF_EMAIL: user_input[CONF_EMAIL],
+                        CONF_EMAIL: email,
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                     }
                     if location_id:
@@ -71,10 +87,15 @@ class OnIsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # --------------------------------------
 
                     return self.async_create_entry(
-                        title=user_input[CONF_EMAIL], 
+                        title=email,
                         data=data
                     )
 
+            except OnIsAuthError:
+                errors["base"] = "invalid_auth"
+            except OnIsApiError:
+                _LOGGER.exception("API exception during setup")
+                errors["base"] = "cannot_connect"
             except Exception:
                 _LOGGER.exception("Unexpected exception during setup")
                 errors["base"] = "cannot_connect"
