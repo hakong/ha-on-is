@@ -239,7 +239,8 @@ class OnIsPriceSensor(OnIsBaseSensor, SensorEntity):
         try:
             tariffs = self.session_data.get("Connector", {}).get("Tariffs", [])
             if tariffs:
-                return tariffs[0].get("Powers", [])[0].get("Times", [])[0].get("Prices", [])[0].get("PricePerUnit")
+                price = tariffs[0].get("Powers", [])[0].get("Times", [])[0].get("Prices", [])[0].get("PricePerUnit")
+                return round(float(price), 2)
         except Exception:
             pass
         return None
