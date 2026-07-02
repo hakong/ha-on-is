@@ -64,6 +64,14 @@ class FakeSession:
 
 
 class OnIsClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_exposes_backend_metadata(self):
+        client = OnIsClient("user@example.com", "secret", session=object())
+
+        self.assertEqual(client.backend_key, "ocean")
+        self.assertEqual(client.backend_name, "Etrel OCEAN")
+        self.assertEqual(client.api_family, "Etrel OCEAN / DuskyWebApi")
+        self.assertEqual(client.base_url, api.BASE_URL)
+
     async def test_parse_online_data_returns_current_sessions(self):
         client = OnIsClient("user@example.com", "secret", session=object())
         response = FakeResponse(200, {"CurrentSessions": [{"Connector": {"Id": 1}}]})

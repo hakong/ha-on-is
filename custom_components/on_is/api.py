@@ -23,6 +23,13 @@ class OnIsAuthError(OnIsApiError):
 
 
 class OnIsClient:
+    """Client for the current ON Etrel OCEAN backend."""
+
+    backend_key = "ocean"
+    backend_name = "Etrel OCEAN"
+    api_family = "Etrel OCEAN / DuskyWebApi"
+    base_url = BASE_URL
+
     def __init__(self, email: str, password: str, session: aiohttp.ClientSession = None):
         self._email = email
         self._password = password

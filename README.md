@@ -36,5 +36,17 @@ Built for the **Etrel OCEAN** white-label platform.
     *   *Required for home chargers to appear when not charging.*
     *   *Used to filter out neighbors in shared garages.*
 
+## ON app migration
+
+ON has announced that its charging app and service system are moving to Monta.
+This integration currently uses the existing **Etrel OCEAN / DuskyWebApi**
+backend used by the current ON app.
+
+To prepare for the migration, the integration now keeps API-specific code behind
+a backend boundary and exposes backend diagnostics on the status sensor and in
+Home Assistant's diagnostics download. When ON's Monta-backed app is live and
+the new API behavior is known, a Monta backend can be added while keeping the
+entity/coordinator layer as stable as possible.
+
 ## Disclaimer
 This is a reverse-engineered integration and is not affiliated with Orka náttúrunnar or Etrel. Use at your own risk.

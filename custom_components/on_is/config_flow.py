@@ -11,8 +11,15 @@ from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import OnIsApiError, OnIsAuthError, OnIsClient
-from .const import DOMAIN, CONF_LOCATION_ID, CONF_EVSE_CODE
+from .api import OnIsApiError, OnIsAuthError
+from .backends import create_backend_client
+from .const import (
+    CONF_BACKEND,
+    CONF_EVSE_CODE,
+    CONF_LOCATION_ID,
+    DEFAULT_BACKEND,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,7 +34,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 class OnIsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for ON."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -56,10 +63,11 @@ class OnIsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
 
             session = async_get_clientsession(self.hass)
-            client = OnIsClient(
+            client = create_backend_client(
                 email=email,
                 password=user_input[CONF_PASSWORD],
                 session=session,
+                backend_key=DEFAULT_BACKEND,
             )
 
             try:
@@ -75,6 +83,7 @@ class OnIsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 
                 if not errors:
                     data = {
+                        CONF_BACKEND: DEFAULT_BACKEND,
                         CONF_EMAIL: email,
                         CONF_PASSWORD: user_input[CONF_PASSWORD],
                     }

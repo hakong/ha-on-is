@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -11,16 +11,20 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 
-from .api import OnIsClient
+from .backends import OnIsBackendClient
 from .const import DOMAIN, SCAN_INTERVAL_SECONDS, CONF_LOCATION_ID, CONF_EVSE_CODE
-from .helpers import evse_codes_match, extract_evse_code
+from .helpers import (
+    apply_cached_last_communication,
+    evse_codes_match,
+    extract_evse_code,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 class OnIsCoordinator(DataUpdateCoordinator):
     """Class to manage fetching ON data from the API."""
 
-    def __init__(self, hass: HomeAssistant, client: OnIsClient, entry: ConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, client: OnIsBackendClient, entry: ConfigEntry) -> None:
         """Initialize."""
         super().__init__(
             hass,
@@ -32,6 +36,13 @@ class OnIsCoordinator(DataUpdateCoordinator):
         self.entry = entry
         self._poll_count = 0 
         self._cached_history = {}
+        self._cached_last_communication: dict[int, str] = {}
+        self.backend_key = client.backend_key
+        self.backend_name = client.backend_name
+        self.api_family = client.api_family
+        self.base_url = client.base_url
+        self.last_successful_update: str | None = None
+        self.last_update_error: str | None = None
 
     async def _async_update_data(self):
         """Fetch data from API endpoint."""
@@ -64,8 +75,15 @@ class OnIsCoordinator(DataUpdateCoordinator):
             for conn_id, session in data_map.items():
                 if conn_id in self._cached_history:
                     session["LastSessionData"] = self._cached_history[conn_id]
+                apply_cached_last_communication(
+                    conn_id,
+                    session,
+                    self._cached_last_communication,
+                )
 
             # 5. Filter Results
+            self.last_successful_update = datetime.now(timezone.utc).isoformat()
+            self.last_update_error = None
             target_code = self.entry.data.get(CONF_EVSE_CODE)
             if target_code and data_map:
                 filtered_map = {}
@@ -77,6 +95,7 @@ class OnIsCoordinator(DataUpdateCoordinator):
             return data_map
 
         except Exception as err:
+            self.last_update_error = str(err)
             raise UpdateFailed(f"Error communicating with API: {err}")
 
     async def _refresh_history_cache(self):

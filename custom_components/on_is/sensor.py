@@ -13,11 +13,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfPower, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import OnIsCoordinator
-from .helpers import format_minutes
+from .helpers import (
+    LAST_COMMUNICATION_TIME,
+    LAST_COMMUNICATION_TIME_CACHED,
+    format_minutes,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,9 +93,9 @@ class OnIsBaseSensor(CoordinatorEntity):
         self._attr_device_info = {
             "identifiers": {(DOMAIN, str(connector_id))},
             "name": base_name,
-            "manufacturer": "Etrel / ON",
+            "manufacturer": "ON",
             "model": cp_code or "EV Charger",
-            "sw_version": "Ocean API",
+            "sw_version": getattr(coordinator, "backend_name", "ON API"),
         }
 
     @property
@@ -129,6 +134,11 @@ class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
             "phases": phases,
             "connector_type": conn.get("Type", {}).get("Title"),
             "evse_id": evse.get("Id"),
+            "backend": self.coordinator.backend_name,
+            "backend_key": self.coordinator.backend_key,
+            "api_family": self.coordinator.api_family,
+            "last_successful_update": self.coordinator.last_successful_update,
+            "last_update_error": self.coordinator.last_update_error,
         }
 
 
@@ -166,7 +176,7 @@ class OnIsEnergySensor(OnIsBaseSensor, SensorEntity):
         return self.session_data.get("Measurements", {}).get("ActiveEnergyConsumed", 0.0)
 
 
-class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity):
+class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity, RestoreEntity):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_entity_category = EntityCategory.DIAGNOSTIC 
 
@@ -174,18 +184,52 @@ class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity):
         super().__init__(coordinator, connector_id, session)
         self._attr_name = f"{super().name} Last Communication with charger"
         self._attr_unique_id = f"{super().unique_id}_last_comm"
+        self._cached_native_value: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last known communication timestamp after HA restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is None or last_state.state in {"unknown", "unavailable"}:
+            return
+
+        self._cached_native_value = self._parse_timestamp(last_state.state)
 
     @property
     def native_value(self):
-        if not self.session_data:
-            return None
-        ts = self.session_data.get("LastCommunicationTime")
+        ts = None
+        if self.session_data:
+            ts = self.session_data.get(LAST_COMMUNICATION_TIME)
         if ts:
-            try:
-                return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-        return None
+            parsed = self._parse_timestamp(ts)
+            if parsed:
+                self._cached_native_value = parsed
+                return parsed
+        return self._cached_native_value
+
+    @property
+    def available(self) -> bool:
+        return super().available or self._cached_native_value is not None
+
+    @property
+    def extra_state_attributes(self):
+        session = self.session_data
+        if not session:
+            return {"last_communication_source": "restored"}
+        if session.get(LAST_COMMUNICATION_TIME_CACHED):
+            return {"last_communication_source": "cached"}
+        if session.get(LAST_COMMUNICATION_TIME):
+            return {"last_communication_source": "current"}
+        if self._cached_native_value is not None:
+            return {"last_communication_source": "restored"}
+        return {"last_communication_source": "missing"}
+
+    @staticmethod
+    def _parse_timestamp(value: str) -> datetime | None:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
 
 class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):
