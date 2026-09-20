@@ -5,9 +5,15 @@ from typing import Any, Protocol
 
 import aiohttp
 
-from .const import BACKEND_OCEAN, DEFAULT_BACKEND
+from .const import BACKEND_MONTA_APP, BACKEND_OCEAN, DEFAULT_BACKEND
 
 BACKEND_METADATA = {
+    BACKEND_MONTA_APP: {
+        "key": BACKEND_MONTA_APP,
+        "name": "Monta (ON app)",
+        "api_family": "Monta signed-in app private API",
+        "base_url": "https://api.monta.app",
+    },
     BACKEND_OCEAN: {
         "key": BACKEND_OCEAN,
         "name": "Etrel OCEAN",
@@ -65,6 +71,7 @@ def create_backend_client(
     password: str,
     session: aiohttp.ClientSession,
     backend_key: str | None = None,
+    **options: Any,
 ) -> OnIsBackendClient:
     """Create the configured backend client.
 
@@ -73,6 +80,24 @@ def create_backend_client(
     config flow, coordinator, sensors, and switches.
     """
     key = backend_key or DEFAULT_BACKEND
+    if key == BACKEND_MONTA_APP:
+        from .monta_backend import MontaOnIsClient
+
+        return MontaOnIsClient(
+            email=email,
+            password=password,
+            session=session,
+            charge_point_id=options.get("charge_point_id"),
+            team_id=options.get("team_id"),
+            evse_code=options.get("evse_code"),
+            connector_id=options.get("connector_id"),
+            device_uuid=options.get("device_uuid"),
+            access_token=options.get("access_token"),
+            refresh_token=options.get("refresh_token"),
+            access_token_expires_at=options.get("access_token_expires_at"),
+            refresh_token_expires_at=options.get("refresh_token_expires_at"),
+        )
+
     if key != BACKEND_OCEAN:
         raise ValueError(f"Unsupported ON backend: {key}")
 

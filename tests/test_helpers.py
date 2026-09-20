@@ -20,6 +20,7 @@ apply_cached_last_communication = helpers.apply_cached_last_communication
 evse_codes_match = helpers.evse_codes_match
 extract_evse_code = helpers.extract_evse_code
 format_minutes = helpers.format_minutes
+rate_limit_backoff_seconds = helpers.rate_limit_backoff_seconds
 LAST_COMMUNICATION_TIME = helpers.LAST_COMMUNICATION_TIME
 LAST_COMMUNICATION_TIME_CACHED = helpers.LAST_COMMUNICATION_TIME_CACHED
 
@@ -48,6 +49,15 @@ class HelperTests(unittest.TestCase):
     def test_format_minutes(self):
         self.assertEqual(format_minutes(12), "12m")
         self.assertEqual(format_minutes(80), "1h 20m")
+
+    def test_rate_limit_backoff_is_exponential_and_bounded(self):
+        self.assertEqual(rate_limit_backoff_seconds(1), 60)
+        self.assertEqual(rate_limit_backoff_seconds(3), 240)
+        self.assertEqual(rate_limit_backoff_seconds(20), 900)
+
+    def test_rate_limit_backoff_honors_server_retry_after(self):
+        self.assertEqual(rate_limit_backoff_seconds(1, 30), 60)
+        self.assertEqual(rate_limit_backoff_seconds(1, 1800), 1800)
 
     def test_apply_cached_last_communication_stores_current_timestamp(self):
         cache = {}

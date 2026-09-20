@@ -8,16 +8,18 @@ from typing import Any
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import OnIsCoordinator
+from .entity import charger_base_name, charger_device_info
 from .helpers import extract_evse_code
 
 _LOGGER = logging.getLogger(__name__)
 
-STICKY_TIMEOUT = 180
+OPTIMISTIC_TIMEOUT = 30
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -45,7 +47,7 @@ async def async_setup_entry(
 
 
 class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to Start/Stop charging with Optimistic State."""
+    """Switch to start or stop charging with brief optimistic state."""
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator)
@@ -54,24 +56,14 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         self._override_state = None
         self._override_timestamp = 0
         
-        cp_code = session.get("ChargePoint", {}).get("FriendlyCode", "")
-        # Fix for Active API returning long code "IS*ONP...-3806"
-        if cp_code and "-" in cp_code:
-            cp_code = cp_code.split("-")[-1]
-        
-        if cp_code:
-            base_name = f"ON Charger {cp_code}"
-        else:
-            loc_name = session.get("Location", {}).get("FriendlyName", "Unknown")
-            base_name = f"ON {loc_name}"
+        base_name = charger_base_name(session)
 
         self._attr_name = f"{base_name} Charging"
         self._attr_unique_id = f"on_is_{connector_id}_switch"
         self._attr_icon = "mdi:ev-plug-type2"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, str(connector_id))},
-            "name": base_name,
-        }
+        self._attr_device_info = charger_device_info(
+            connector_id, session, coordinator
+        )
 
     @property
     def session_data(self):
@@ -79,29 +71,42 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self.session_data is not None
+        return super().available and self.session_data is not None
 
     @property
     def is_on(self) -> bool:
         """Return true if a charging session is active (authorized)."""
+        actual_state = self._authoritative_is_on()
         if self._override_state is not None:
-            if time.time() - self._override_timestamp < STICKY_TIMEOUT:
-                return self._override_state
-            else:
+            if self._command_failed() or actual_state == self._override_state:
                 self._override_state = None
-        
+                return actual_state
+            if time.time() - self._override_timestamp < OPTIMISTIC_TIMEOUT:
+                return self._override_state
+            self._override_state = None
+        return actual_state
+
+    @property
+    def assumed_state(self) -> bool:
+        """Mark the switch as assumed only while Monta confirms a command."""
+        return self._override_state is not None
+
+    def _authoritative_is_on(self) -> bool:
+        """Derive charging state from the latest coordinator payload."""
         if not self.session_data:
             return False
-        
-        # Check for Active Session ID
+
         session_info = self.session_data.get("ChargingSession", {})
         if session_info.get("Id"):
             return True
-            
-        # Fallback Logic
-        status_raw = self.session_data.get("Connector", {}).get("Status", {}).get("Title", "")
+
+        status_raw = (
+            self.session_data.get("Connector", {})
+            .get("Status", {})
+            .get("Title", "")
+        )
         status = str(status_raw).lower().strip()
-        
+
         if status == "charging":
             return True
 
@@ -112,40 +117,56 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
                 return True
         except (ValueError, TypeError):
             pass
-            
+
         return False
+
+    def _command_failed(self) -> bool:
+        if not self.session_data:
+            return False
+        monta = self.session_data.get("Monta", {})
+        return bool(monta.get("FailedAt") or monta.get("FailureReason"))
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Start charging."""
         if not self.session_data:
-            _LOGGER.error("Cannot start charging: No active session data found")
-            return
+            raise HomeAssistantError("Cannot start charging without charger data")
 
         evse_code = self._get_evse_code()
         conn_id = self.connector_id
-        
-        await self.coordinator.client.start_charging(evse_code, conn_id)
-        
+
+        monta = self.session_data.get("Monta", {})
+        if monta.get("CanStart") is False:
+            reason = monta.get("CanStartReason") or "not currently allowed"
+            raise HomeAssistantError(f"Monta cannot start charging: {reason}")
+
+        try:
+            await self.coordinator.client.start_charging(evse_code, conn_id)
+        except Exception as err:
+            raise HomeAssistantError(f"Could not start ON charging: {err}") from err
+
         self._override_state = True
         self._override_timestamp = time.time()
         self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_refresh_after_control()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Stop charging."""
         if not self.session_data:
-            return
+            raise HomeAssistantError("Cannot stop charging without charger data")
 
         evse_code = self._get_evse_code()
         cp_id = self.session_data.get("ChargePoint", {}).get("Id")
         conn_id = self.connector_id
 
-        await self.coordinator.client.stop_charging(evse_code, cp_id, conn_id)
+        try:
+            await self.coordinator.client.stop_charging(evse_code, cp_id, conn_id)
+        except Exception as err:
+            raise HomeAssistantError(f"Could not stop ON charging: {err}") from err
 
         self._override_state = False
         self._override_timestamp = time.time()
         self.async_write_ha_state()
-        await self.coordinator.async_request_refresh()
+        await self.coordinator.async_refresh_after_control()
 
     def _get_evse_code(self) -> str:
         return extract_evse_code(self.session_data)

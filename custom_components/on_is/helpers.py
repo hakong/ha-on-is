@@ -40,6 +40,16 @@ def format_minutes(total_minutes: int) -> str:
     return f"{hours}h {minutes}m"
 
 
+def rate_limit_backoff_seconds(
+    failures: int,
+    retry_after: float | None = None,
+) -> float:
+    """Honor Retry-After or return bounded exponential backoff."""
+    if retry_after is not None:
+        return max(60, retry_after)
+    return min(900, 60 * (2 ** max(0, failures - 1)))
+
+
 def apply_cached_last_communication(
     connector_id: int,
     session: dict,

@@ -47,15 +47,26 @@ class BackendTests(unittest.TestCase):
     def test_default_backend_metadata(self):
         metadata = backends.get_backend_metadata()
 
-        self.assertEqual(metadata["key"], "ocean")
-        self.assertEqual(metadata["name"], "Etrel OCEAN")
-        self.assertEqual(metadata["base_url"], api.BASE_URL)
+        self.assertEqual(metadata["key"], "monta_app")
+        self.assertEqual(metadata["name"], "Monta (ON app)")
+        self.assertEqual(metadata["base_url"], "https://api.monta.app")
 
     def test_create_default_backend_client(self):
         client = backends.create_backend_client(
             "user@example.com",
             "secret",
             session=object(),
+        )
+
+        self.assertEqual(type(client).__name__, "MontaOnIsClient")
+        self.assertEqual(client.backend_key, "monta_app")
+
+    def test_legacy_ocean_backend_remains_explicitly_available(self):
+        client = backends.create_backend_client(
+            "user@example.com",
+            "secret",
+            session=object(),
+            backend_key="ocean",
         )
 
         self.assertIsInstance(client, api.OnIsClient)

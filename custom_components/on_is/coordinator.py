@@ -1,23 +1,33 @@
 """Data update coordinator for the ON integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
 
 from .backends import OnIsBackendClient
-from .const import DOMAIN, SCAN_INTERVAL_SECONDS, CONF_LOCATION_ID, CONF_EVSE_CODE
+from .const import (
+    BACKEND_MONTA_APP,
+    CONF_EVSE_CODE,
+    CONF_LOCATION_ID,
+    DOMAIN,
+    SCAN_INTERVAL_SECONDS,
+)
 from .helpers import (
     apply_cached_last_communication,
     evse_codes_match,
     extract_evse_code,
+    rate_limit_backoff_seconds,
 )
+from .monta.errors import MontaAuthError, MontaRateLimitError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +45,8 @@ class OnIsCoordinator(DataUpdateCoordinator):
         self.client = client
         self.entry = entry
         self._poll_count = 0 
+        self._rate_limit_failures = 0
+        self._normal_update_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
         self._cached_history = {}
         self._cached_last_communication: dict[int, str] = {}
         self.backend_key = client.backend_key
@@ -59,7 +71,7 @@ class OnIsCoordinator(DataUpdateCoordinator):
             # 2. Fetch & Merge Passive Status (Home Location)
             # We now do this ALWAYS if a location is configured, to get Price/Tariffs
             config_id = self.entry.data.get(CONF_LOCATION_ID)
-            if config_id:
+            if config_id and self.backend_key != BACKEND_MONTA_APP:
                 try:
                     await self._merge_specific_location(int(config_id), data_map)
                 except Exception as e:
@@ -73,7 +85,10 @@ class OnIsCoordinator(DataUpdateCoordinator):
 
             # 4. Inject History
             for conn_id, session in data_map.items():
-                if conn_id in self._cached_history:
+                latest_session = session.get("LastSessionData")
+                if latest_session:
+                    self._cached_history[conn_id] = latest_session
+                elif conn_id in self._cached_history:
                     session["LastSessionData"] = self._cached_history[conn_id]
                 apply_cached_last_communication(
                     conn_id,
@@ -84,6 +99,9 @@ class OnIsCoordinator(DataUpdateCoordinator):
             # 5. Filter Results
             self.last_successful_update = datetime.now(timezone.utc).isoformat()
             self.last_update_error = None
+            self._rate_limit_failures = 0
+            self.update_interval = self._normal_update_interval
+            self._persist_client_config()
             target_code = self.entry.data.get(CONF_EVSE_CODE)
             if target_code and data_map:
                 filtered_map = {}
@@ -94,9 +112,53 @@ class OnIsCoordinator(DataUpdateCoordinator):
             
             return data_map
 
+        except ConfigEntryAuthFailed:
+            raise
         except Exception as err:
+            if isinstance(err, MontaAuthError):
+                raise ConfigEntryAuthFailed("ON account authentication failed") from err
+            if isinstance(err, MontaRateLimitError):
+                self._rate_limit_failures += 1
+                delay = rate_limit_backoff_seconds(
+                    self._rate_limit_failures,
+                    err.retry_after,
+                )
+                self.update_interval = timedelta(seconds=delay)
+                self.last_update_error = (
+                    f"Monta API rate limit reached; retrying in {delay:g} seconds"
+                )
+                raise UpdateFailed(self.last_update_error) from err
             self.last_update_error = str(err)
             raise UpdateFailed(f"Error communicating with API: {err}")
+
+    def _persist_client_config(self) -> None:
+        """Persist reusable app identity and rotating auth state."""
+        get_data = getattr(self.client, "persisted_config_data", None)
+        if get_data is None:
+            return
+        backend_data = get_data()
+        data = dict(self.entry.data)
+        changed = False
+        for key, value in backend_data.items():
+            if data.get(key) != value:
+                data[key] = value
+                changed = True
+        if changed:
+            self.hass.config_entries.async_update_entry(self.entry, data=data)
+
+    async def async_release_cable(self) -> None:
+        """Release the cable through a backend that supports connector unlock."""
+        release = getattr(self.client, "release_cable", None)
+        if release is None:
+            raise ValueError("The configured ON backend cannot release the cable")
+        await release()
+        await asyncio.sleep(3)
+        await self.async_request_refresh()
+
+    async def async_refresh_after_control(self) -> None:
+        """Give Monta time to resolve an asynchronous command, then refresh."""
+        await asyncio.sleep(3)
+        await self.async_request_refresh()
 
     async def _refresh_history_cache(self):
         """Fetch history and update the cache."""
@@ -108,6 +170,8 @@ class OnIsCoordinator(DataUpdateCoordinator):
                 if h_conn_id and h_conn_id not in seen_connectors:
                     self._cached_history[h_conn_id] = item
                     seen_connectors.add(h_conn_id)
+        except (MontaAuthError, MontaRateLimitError):
+            raise
         except Exception as e:
             _LOGGER.warning(f"Failed to update history: {e}")
 

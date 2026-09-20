@@ -3,18 +3,35 @@
     "step": {
       "user": {
         "title": "Connect to ON",
-        "description": "Enter your credentials. Optionally provide your Home Charger QR Code to enable status detection when not charging.",
+        "description": "Sign in with the same account used by the ON charging app.",
         "data": {
           "email": "Email",
-          "password": "Password",
-          "evse_code": "Home Charger QR Code (e.g. IS*ONP...)"
+          "password": "Password"
+        }
+      },
+      "charger": {
+        "title": "Choose charger",
+        "description": "Select the ON charger to add.",
+        "data": {
+          "charge_point_id": "Charger"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reconnect to ON",
+        "description": "Enter the current password for {email}.",
+        "data": {
+          "password": "Password"
         }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect",
-      "invalid_auth": "Invalid authentication",
-      "invalid_evse_code": "Could not find a charger with this QR Code."
+      "invalid_auth": "Invalid email or password",
+      "no_chargers": "No ON chargers were found for this account"
+    },
+    "abort": {
+      "already_configured": "This ON charger is already configured",
+      "reauth_successful": "ON account reconnected successfully"
     }
   }
 }
