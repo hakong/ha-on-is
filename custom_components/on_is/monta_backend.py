@@ -119,7 +119,7 @@ class MontaOnIsClient:
         self._last_snapshot: ChargerSnapshot | None = None
         self._active_charge: ChargeSession | None = None
         self._hub_detail: dict[str, Any] = {}
-        self._hub_last_attempt = 0.0
+        self._hub_last_attempt: float | None = None
         self._hub_updated_at: str | None = None
         self._hub_error: str | None = None
         self._hub_logs_access_checked = False
@@ -239,14 +239,16 @@ class MontaOnIsClient:
         """Refresh slow-changing Hub health data without affecting core polling."""
         if self._hub is None or self.charge_point_id is None:
             return self._hub_detail
-        now = time.monotonic()
-        if now - self._hub_last_attempt < HUB_HEALTH_REFRESH_SECONDS:
-            return self._hub_detail
-        self._hub_last_attempt = now
-
         token = self._app.token
         if token is None:
             return self._hub_detail
+        now = time.monotonic()
+        if (
+            self._hub_last_attempt is not None
+            and now - self._hub_last_attempt < HUB_HEALTH_REFRESH_SECONDS
+        ):
+            return self._hub_detail
+        self._hub_last_attempt = now
         self._hub.set_access_token(token.access_token)
         try:
             detail = await self._hub.get_charge_point(int(self.charge_point_id))

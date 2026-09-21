@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from test_monta import models
 
@@ -321,8 +322,18 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
             team_id=42,
         )
 
-        data = (await client.get_online_data())[0]
-        await client.get_online_data()
+        clock = SimpleNamespace(now=42.0)
+        with patch(
+            "custom_components.on_is.monta_backend.time",
+            SimpleNamespace(monotonic=lambda: clock.now),
+        ):
+            data = (await client.get_online_data())[0]
+            await client.get_online_data()
+            self.assertEqual(
+                [call[0] for call in hub.calls].count("hub_detail"), 1
+            )
+            clock.now += 301
+            await client.get_online_data()
 
         self.assertEqual(hub.access_token, "token")
         self.assertEqual(data["Measurements"]["MeterTotal"], 1702.5)
@@ -336,7 +347,7 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(data["Monta"]["LogsAvailable"])
         self.assertEqual(data["Monta"]["LogsError"], "access_denied")
         self.assertEqual(
-            [call[0] for call in hub.calls].count("hub_detail"), 1
+            [call[0] for call in hub.calls].count("hub_detail"), 2
         )
 
     async def test_completed_charge_with_failed_at_is_reported_as_failed(self):
