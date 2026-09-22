@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -21,17 +21,21 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import BACKEND_MONTA_APP, DOMAIN
 from .coordinator import OnIsCoordinator
 from .entity import charger_base_name, charger_device_info
 from .helpers import (
     LAST_COMMUNICATION_TIME,
     LAST_COMMUNICATION_TIME_CACHED,
+    elapsed_minutes_since,
     format_minutes,
+    start_readiness,
 )
+from .monta.models import parse_datetime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +68,11 @@ def _build_sensor_entities(coordinator, connector_id, session):
     """Create all sensor entities for a connector."""
     return [
         OnIsStatusSensor(coordinator, connector_id, session),
+        *(
+            [OnIsStartReadinessSensor(coordinator, connector_id, session)]
+            if coordinator.backend_key == BACKEND_MONTA_APP
+            else []
+        ),
         OnIsHealthSensor(coordinator, connector_id, session),
         OnIsFirmwareSensor(coordinator, connector_id, session),
         OnIsStabilityScoreSensor(coordinator, connector_id, session),
@@ -72,6 +81,7 @@ def _build_sensor_entities(coordinator, connector_id, session):
         OnIsPowerSensor(coordinator, connector_id, session),
         OnIsEnergySensor(coordinator, connector_id, session),
         OnIsLastCommSensor(coordinator, connector_id, session),
+        OnIsCloudDataAgeSensor(coordinator, connector_id, session),
         OnIsSessionStartSensor(coordinator, connector_id, session),
         OnIsPriceSensor(coordinator, connector_id, session),
         OnIsLastSessionCostSensor(coordinator, connector_id, session),
@@ -162,6 +172,9 @@ class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
             "cable_plugged_in": monta.get("CablePluggedIn"),
             "charger_connected": monta.get("Connected"),
             "active_charge_id": monta.get("ActiveChargeId"),
+            "active_charge_present": monta.get("ActiveChargePresent"),
+            "active_charge_accessible": monta.get("ActiveChargeAccessible"),
+            "active_charge_summary_state": monta.get("ActiveChargeSummaryState"),
             "can_start": monta.get("CanStart"),
             "can_start_reason": monta.get("CanStartReason"),
             "can_stop": monta.get("CanStop"),
@@ -177,6 +190,41 @@ class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
             "estimated_complete_at": monta.get("EstimatedCompleteAt"),
             "can_smart_charge": monta.get("CanSmartCharge"),
             "auto_charge": monta.get("AutoCharge"),
+        }
+
+
+class OnIsStartReadinessSensor(OnIsBaseSensor, SensorEntity):
+    """Show Monta's advisory start check and the last real command result."""
+
+    def __init__(self, coordinator, connector_id, session):
+        super().__init__(coordinator, connector_id, session)
+        self._attr_name = f"{super().name} Start Readiness"
+        self._attr_unique_id = f"{super().unique_id}_start_readiness"
+        self._attr_icon = "mdi:ev-station"
+
+    @property
+    def native_value(self):
+        if not self.session_data:
+            return None
+        return start_readiness(self.session_data.get("Monta", {}))
+
+    @property
+    def extra_state_attributes(self):
+        if not self.session_data:
+            return {}
+        monta = self.session_data.get("Monta", {})
+        return {
+            "advisory_only": True,
+            "can_start": monta.get("CanStart"),
+            "can_start_reason": monta.get("CanStartReason"),
+            "active_charge_present": monta.get("ActiveChargePresent"),
+            "active_charge_accessible": monta.get("ActiveChargeAccessible"),
+            "active_charge_summary_state": monta.get("ActiveChargeSummaryState"),
+            "paying_team_available": monta.get("PayingTeamAvailable"),
+            "payer_lookup_error": monta.get("PayerLookupError"),
+            "last_start_attempt_at": self.coordinator.last_start_attempt_at,
+            "last_start_result": self.coordinator.last_start_result,
+            "last_start_error": self.coordinator.last_start_error,
         }
 
 
@@ -334,7 +382,7 @@ class OnIsChargeCountSensor(OnIsBaseSensor, SensorEntity):
         return self.session_data.get("Monta", {}).get("ChargeCount")
 
 
-class OnIsLastConnectedSensor(OnIsBaseSensor, SensorEntity):
+class OnIsLastConnectedSensor(OnIsBaseSensor, SensorEntity, RestoreEntity):
     """Latest backend connection timestamp reported by Monta."""
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
@@ -343,20 +391,35 @@ class OnIsLastConnectedSensor(OnIsBaseSensor, SensorEntity):
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
-        self._attr_name = f"{super().name} Last Connected"
+        self._attr_name = f"{super().name} Charger Last Connected to Monta"
         self._attr_unique_id = f"{super().unique_id}_last_connected"
+        self._cached_native_value: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the charger's last known connection event after restart."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state not in {"unknown", "unavailable"}:
+            self._cached_native_value = parse_datetime(last_state.state)
+
+    def _last_connected(self) -> datetime | None:
+        session = self.session_data
+        value = (
+            parse_datetime(session.get("Monta", {}).get("LastConnectedAt"))
+            if session
+            else None
+        )
+        if value is not None:
+            self._cached_native_value = value
+        return self._cached_native_value
 
     @property
     def native_value(self):
-        if not self.session_data:
-            return None
-        value = self.session_data.get("Monta", {}).get("LastConnectedAt")
-        if not value:
-            return None
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            return None
+        return self._last_connected()
+
+    @property
+    def available(self) -> bool:
+        return super().available or self._last_connected() is not None
 
     @property
     def extra_state_attributes(self):
@@ -365,7 +428,13 @@ class OnIsLastConnectedSensor(OnIsBaseSensor, SensorEntity):
         return {
             "disconnected_at": self.session_data.get("Monta", {}).get(
                 "DisconnectedAt"
-            )
+            ),
+            "timestamp_source": (
+                "reported"
+                if self.coordinator.last_update_success
+                and self.session_data.get("Monta", {}).get("LastConnectedAt")
+                else "last_known"
+            ),
         }
 
 
@@ -429,7 +498,7 @@ class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity, RestoreEntity):
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
-        self._attr_name = f"{super().name} Last Communication with charger"
+        self._attr_name = f"{super().name} Last Charge Point Data Update"
         self._attr_unique_id = f"{super().unique_id}_last_comm"
         self._cached_native_value: datetime | None = None
 
@@ -477,6 +546,64 @@ class OnIsLastCommSensor(OnIsBaseSensor, SensorEntity, RestoreEntity):
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
+
+
+class OnIsCloudDataAgeSensor(OnIsBaseSensor, SensorEntity, RestoreEntity):
+    """Age of the integration's last successful core API refresh."""
+
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:cloud-clock-outline"
+
+    def __init__(self, coordinator, connector_id, session):
+        super().__init__(coordinator, connector_id, session)
+        self._attr_name = f"{super().name} Cloud Data Age"
+        self._attr_unique_id = f"{super().unique_id}_cloud_data_age"
+        self._cached_last_success: datetime | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Keep the age useful through an API outage and HA restart."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state:
+            self._cached_last_success = parse_datetime(
+                last_state.attributes.get("last_successful_update")
+            )
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass, self._update_age, timedelta(minutes=1)
+            )
+        )
+
+    def _last_success(self) -> datetime | None:
+        value = parse_datetime(self.coordinator.last_successful_update)
+        if value is not None:
+            self._cached_last_success = value
+        return self._cached_last_success
+
+    @property
+    def native_value(self):
+        return elapsed_minutes_since(self._last_success())
+
+    @property
+    def available(self) -> bool:
+        return self._last_success() is not None
+
+    @property
+    def extra_state_attributes(self):
+        last_success = self._last_success()
+        return {
+            "last_successful_update": (
+                last_success.isoformat() if last_success else None
+            ),
+            "api_available": self.coordinator.last_update_success,
+            "last_update_error": self.coordinator.last_update_error,
+        }
+
+    def _update_age(self, _now: datetime) -> None:
+        self.async_write_ha_state()
 
 
 class OnIsSessionStartSensor(OnIsBaseSensor, SensorEntity):

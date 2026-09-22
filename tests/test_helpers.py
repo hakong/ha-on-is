@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
 
@@ -21,6 +22,8 @@ evse_codes_match = helpers.evse_codes_match
 extract_evse_code = helpers.extract_evse_code
 format_minutes = helpers.format_minutes
 rate_limit_backoff_seconds = helpers.rate_limit_backoff_seconds
+start_readiness = helpers.start_readiness
+elapsed_minutes_since = helpers.elapsed_minutes_since
 LAST_COMMUNICATION_TIME = helpers.LAST_COMMUNICATION_TIME
 LAST_COMMUNICATION_TIME_CACHED = helpers.LAST_COMMUNICATION_TIME_CACHED
 
@@ -58,6 +61,37 @@ class HelperTests(unittest.TestCase):
     def test_rate_limit_backoff_honors_server_retry_after(self):
         self.assertEqual(rate_limit_backoff_seconds(1, 30), 60)
         self.assertEqual(rate_limit_backoff_seconds(1, 1800), 1800)
+
+    def test_start_readiness_exposes_reason_without_blocking_user_action(self):
+        self.assertEqual(
+            start_readiness({"CanStart": False, "CanStartReason": "PAYMENT_NOT_ALLOWED"}),
+            "Payment not allowed for this account",
+        )
+        self.assertEqual(
+            start_readiness({"CanStart": False, "CanStartReason": "NO_ELIGIBLE_PAYER"}),
+            "No eligible ON billing account",
+        )
+        self.assertEqual(start_readiness({"CanStart": True}), "Ready to start")
+        self.assertEqual(
+            start_readiness({"ActiveChargeId": "123", "CanStart": False}),
+            "Charge in progress",
+        )
+        self.assertEqual(
+            start_readiness({
+                "ActiveChargePresent": True,
+                "ActiveChargeSummaryState": "paused",
+                "CanStart": False,
+                "CanStartReason": "NOT_AVAILABLE",
+            }),
+            "Occupied (paused): session not visible to this account",
+        )
+
+    def test_elapsed_minutes_since_last_cloud_update(self):
+        now = datetime(2026, 9, 22, 10, 15, tzinfo=timezone.utc)
+        self.assertIsNone(elapsed_minutes_since(None, now))
+        self.assertEqual(elapsed_minutes_since(now - timedelta(seconds=119), now), 1)
+        self.assertEqual(elapsed_minutes_since(now - timedelta(minutes=13), now), 13)
+        self.assertEqual(elapsed_minutes_since(now + timedelta(minutes=1), now), 0)
 
     def test_apply_cached_last_communication_stores_current_timestamp(self):
         cache = {}

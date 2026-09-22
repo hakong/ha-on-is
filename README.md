@@ -14,10 +14,16 @@ Etrel OCEAN client remains in the source only as a compatibility building block.
 * **State:** Available, cable connected/preparing, starting, paused, charging,
   stopping, completed, failed and disconnected states. Asynchronous start
   failures and Monta's safe error description are retained with the latest
-  session.
+  session. A charger occupied by a session not visible to this ON account is
+  shown as busy, but its charge details and controls remain unavailable.
 * **Live monitoring:** Power, session energy, session cost, price and duration.
 * **Connection detail:** Separate cable-connected and cloud-connected binary
-  sensors, plus a cached last-communication timestamp.
+  sensors. Charger Last Connected to Monta records the charger's last reported
+  connection event. Last Charge Point Data Update tracks the latest available
+  charging measurement or charge-point update, falling back to a connection or
+  connector timestamp; it is not proof of a charger message. Both retain their
+  last known value through an outage. Cloud Data Age counts minutes since the
+  integration's last successful API refresh and keeps updating through an outage.
 * **Diagnostics:** Health summary, protocol and connector errors, firmware
   status, stability score, charge count, last connection, OCPP/MID and meter
   information. Slow-changing Hub details are refreshed every five minutes
@@ -25,9 +31,15 @@ Etrel OCEAN client remains in the source only as a compatibility building block.
 * **History:** State, cost, energy, duration, payment, failure and receipt
   metadata for the latest session or charging attempt.
 * **Control:** Account-credit start/stop and explicit cable release actions.
+  A Start Readiness sensor shows Monta's current eligibility reason before you
+  act. This is advisory: an explicit start request is still sent even when
+  Monta's preview says unavailable. A rejected request creates a Home Assistant
+  notification with the actual error and records it on the sensor. An accepted
+  request is not proof that energy is flowing; Status and power confirm that.
 * **Optional telemetry:** Per-phase current/voltage, vehicle SoC and lifetime
   meter sensors are created disabled by default because the charger may return
-  no values for them.
+  no values for them. Meter Total uses only Hub lifetime/physical meter data,
+  never the app's last-session meter value.
 
 ## Installation
 

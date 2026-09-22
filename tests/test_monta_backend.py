@@ -129,6 +129,7 @@ class FakeAppClient:
         return models.MontaPage(items=(completed,))
 
     async def get_default_paying_team(self, charge_point_id):
+        self.calls.append(("payer", str(charge_point_id)))
         return MontaPayingTeam(id="42", can_pay=True, pre_select=True)
 
     async def start_charge(self, charge_point_id, paying_team_id):
@@ -244,6 +245,7 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["Monta"]["CablePluggedIn"])
         self.assertTrue(data["Monta"]["Connected"])
         self.assertTrue(data["Monta"]["CanUnlock"])
+        self.assertIsNone(data["Measurements"]["MeterTotal"])
         self.assertIn(("active", "6440650"), app.calls)
         self.assertIn(
             ("charge_detail", "889565977676087673"), app.calls
@@ -302,6 +304,46 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(any(call[0] == "teams" for call in app.calls))
 
+    async def test_start_eligibility_uses_billing_team_and_caches_lookup(self):
+        class BillingContextApp(FakeAppClient):
+            async def get_charge_point(self, charge_point_id, **kwargs):
+                point = await super().get_charge_point(charge_point_id, **kwargs)
+                point["details"]["can_start"] = kwargs.get("team_id") == "42"
+                point["details"]["can_start_reason"] = (
+                    None if point["details"]["can_start"] else "PAYMENT_NOT_ALLOWED"
+                )
+                return point
+
+        app = BillingContextApp()
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app,
+            charge_point_id=6440650, team_id=99,
+        )
+
+        first = (await client.get_online_data())[0]
+        await client.get_online_data()
+
+        self.assertTrue(first["Monta"]["CanStart"])
+        self.assertEqual(first["Monta"]["CanStartReason"], None)
+        self.assertEqual([call[0] for call in app.calls].count("payer"), 1)
+        details = [call for call in app.calls if call[0] == "detail"]
+        self.assertTrue(all(call[2]["team_id"] == "42" for call in details))
+
+    async def test_missing_billing_team_is_visible(self):
+        class NoPayerApp(FakeAppClient):
+            async def get_default_paying_team(self, charge_point_id):
+                return None
+
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=NoPayerApp(),
+            charge_point_id=6440650, team_id=99,
+        )
+        data = (await client.get_online_data())[0]
+
+        self.assertFalse(data["Monta"]["CanStart"])
+        self.assertEqual(data["Monta"]["CanStartReason"], "NO_ELIGIBLE_PAYER")
+        self.assertFalse(data["Monta"]["PayingTeamAvailable"])
+
     async def test_enriches_and_caches_hub_health_with_app_bearer(self):
         app = FakeAppClient()
         app_point = await app.get_charge_point(6440650)
@@ -336,7 +378,7 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
             await client.get_online_data()
 
         self.assertEqual(hub.access_token, "token")
-        self.assertEqual(data["Measurements"]["MeterTotal"], 1702.5)
+        self.assertEqual(data["Measurements"]["MeterTotal"], 66.282)
         self.assertEqual(data["Monta"]["LifetimeKwh"], 66.282)
         self.assertEqual(data["Monta"]["ChargeCount"], 5)
         self.assertEqual(data["Monta"]["ProtocolErrorCode"], "NoError")
@@ -349,6 +391,93 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call[0] for call in hub.calls].count("hub_detail"), 2
         )
+
+    async def test_old_completed_charge_does_not_override_plugged_in_status(self):
+        class PluggedInApp(FakeAppClient):
+            async def get_charge_point(self, charge_point_id, **kwargs):
+                point = await super().get_charge_point(charge_point_id, **kwargs)
+                point.update({"state": "available", "available": True,
+                              "active": False, "active_charge": None})
+                return point
+
+            async def get_charge(self, charge_id):
+                self.calls.append(("charge_detail", str(charge_id)))
+                return self.active
+
+            async def list_charge_sessions(self, **kwargs):
+                return models.MontaPage(items=(self.active,))
+
+        app = PluggedInApp()
+        app.active = models.ChargeSession.from_payload({
+            "id": "old-completed-charge", "state": "completed",
+            "charge_point_info": {"id": 6440650},
+            "stopping_at": "2026-09-20T11:43:00Z",
+            "completed_at": "2026-09-20T11:44:00Z",
+            "user_actions": {"can_unlock": True},
+        })
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app,
+            charge_point_id=6440650, team_id=42,
+        )
+
+        data = (await client.get_online_data())[0]
+
+        self.assertEqual(data["Connector"]["Status"]["Title"], "Preparing")
+        self.assertEqual(data["ChargingSession"], {})
+        self.assertEqual(data["LastSessionData"]["State"], "completed")
+
+    async def test_unreadable_active_charge_is_occupied_not_preparing(self):
+        class OtherSessionApp(FakeAppClient):
+            async def get_charge_point(self, charge_point_id, **kwargs):
+                point = await super().get_charge_point(charge_point_id, **kwargs)
+                point["state"] = "busy-non-charging"
+                point["active_charge"] = {
+                    "id": 889989849962903685,
+                    "state": "paused",
+                }
+                point["details"].update({
+                    "can_start": False,
+                    "can_start_reason": "NOT_AVAILABLE",
+                })
+                return point
+
+            async def get_active_charge(self, charge_point_id):
+                self.calls.append(("active", str(charge_point_id)))
+                return None
+
+        app = OtherSessionApp()
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app,
+            charge_point_id=6440650, team_id=42,
+        )
+
+        data = (await client.get_online_data())[0]
+
+        self.assertEqual(data["Connector"]["Status"]["Title"], "Busy (paused)")
+        self.assertEqual(data["ChargingSession"], {})
+        self.assertTrue(data["Monta"]["ActiveChargePresent"])
+        self.assertFalse(data["Monta"]["ActiveChargeAccessible"])
+        self.assertEqual(data["Monta"]["ActiveChargeSummaryState"], "paused")
+        self.assertFalse(data["Monta"]["CanUnlock"])
+        self.assertFalse(any(call[0] == "charge_detail" for call in app.calls))
+
+        app.active = _charge("old-completed", "completed")
+        second = (await client.get_online_data())[0]
+        self.assertEqual(second["Connector"]["Status"]["Title"], "Busy (paused)")
+        self.assertEqual(second["ChargingSession"], {})
+
+        original_get_charge_point = app.get_charge_point
+
+        async def charging_point(charge_point_id, **kwargs):
+            point = await original_get_charge_point(charge_point_id, **kwargs)
+            point["state"] = "busy-charging"
+            point["active_charge"]["state"] = "charging"
+            return point
+
+        app.get_charge_point = charging_point
+        third = (await client.get_online_data())[0]
+        self.assertEqual(third["Connector"]["Status"]["Title"], "Charging")
+        self.assertEqual(third["ChargingSession"], {})
 
     async def test_completed_charge_with_failed_at_is_reported_as_failed(self):
         class FailedAppClient(FakeAppClient):

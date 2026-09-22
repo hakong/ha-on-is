@@ -27,7 +27,7 @@ from .helpers import (
     extract_evse_code,
     rate_limit_backoff_seconds,
 )
-from .monta.errors import MontaAuthError, MontaRateLimitError
+from .monta.errors import MontaApiError, MontaAuthError, MontaRateLimitError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +55,25 @@ class OnIsCoordinator(DataUpdateCoordinator):
         self.base_url = client.base_url
         self.last_successful_update: str | None = None
         self.last_update_error: str | None = None
+        self.last_start_attempt_at: str | None = None
+        self.last_start_result: str | None = None
+        self.last_start_error: str | None = None
+
+    async def async_start_charging(self, evse_code: str, connector_id: int | str) -> None:
+        """Send an explicit start request and retain its outcome for the UI."""
+        self.last_start_attempt_at = datetime.now(timezone.utc).isoformat()
+        self.last_start_result = "requesting"
+        self.last_start_error = None
+        self.async_update_listeners()
+        try:
+            await self.client.start_charging(evse_code, connector_id)
+        except Exception as err:
+            self.last_start_result = "rejected"
+            self.last_start_error = _start_error_message(err)
+            self.async_update_listeners()
+            raise
+        self.last_start_result = "accepted"
+        self.async_update_listeners()
 
     async def _async_update_data(self):
         """Fetch data from API endpoint."""
@@ -217,3 +236,11 @@ class OnIsCoordinator(DataUpdateCoordinator):
                 
                 if should_add:
                     data_map[conn_id] = passive_session
+
+
+def _start_error_message(err: Exception) -> str:
+    """Keep the server's reason visible without storing its full response."""
+    reason = " ".join(str(err).split()) or type(err).__name__
+    if isinstance(err, MontaApiError) and err.error_code:
+        reason = f"{err.error_code}: {reason}"
+    return reason[:300]

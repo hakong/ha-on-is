@@ -32,8 +32,18 @@ For the complete captured app/API inventory and implementation status, see
   charge record `completed` and stores the actual result in `failed_at` and
   `error`. Scheduled, reserved, charger-suspended and vehicle-suspended paths
   are mapped generically but were not all captured from this installation.
-* The physical charger meter is exposed when present, but the app payload may
-  omit it and its long-term reset semantics have not been observed.
+* The lifetime charger meter uses Hub `total_kwh` or connector `meter_wh` when
+  present. The app's `last_meter_reading_kwh` is not a lifetime meter and is
+  deliberately excluded. Long-term reset semantics have not been observed.
+* Monta's `can_start` is a billing-context-dependent preview, not a command
+  result. The integration checks it using the eligible paying team, displays
+  its reason in Start Readiness, and still sends an explicit user start request.
+  A synchronous rejection is shown in a persistent notification; an accepted
+  request can still fail asynchronously and must be confirmed by Status/power.
+* Monta can report an occupied charger while the signed-in app's active-charge
+  list is empty and Hub returns 403 for that charge. The integration shows
+  occupancy and its summary state, but cannot identify the start source,
+  billing account, live energy/power, or stop such a session from this login.
 * Last communication uses Monta's latest measurement/update/connection time.
   Monta does not expose the old OCEAN heartbeat field with identical semantics.
 * The signed-in app bearer can read Hub charger detail, so protocol errors,

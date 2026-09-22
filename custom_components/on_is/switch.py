@@ -5,6 +5,7 @@ import logging
 import time
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -12,10 +13,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import BACKEND_MONTA_APP, DOMAIN
 from .coordinator import OnIsCoordinator
 from .entity import charger_base_name, charger_device_info
-from .helpers import extract_evse_code
+from .helpers import extract_evse_code, start_readiness
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,11 +93,13 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         return self._override_state is not None
 
     def _authoritative_is_on(self) -> bool:
-        """Derive charging state from the latest coordinator payload."""
+        """Reflect a controllable charge, not another account's occupancy."""
         if not self.session_data:
             return False
 
         session_info = self.session_data.get("ChargingSession", {})
+        if self.coordinator.backend_key == BACKEND_MONTA_APP:
+            return bool(session_info.get("Id"))
         if session_info.get("Id"):
             return True
 
@@ -120,6 +123,17 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
 
         return False
 
+    @property
+    def extra_state_attributes(self):
+        if not self.session_data or self.coordinator.backend_key != BACKEND_MONTA_APP:
+            return {}
+        monta = self.session_data.get("Monta", {})
+        return {
+            "active_charge_present": monta.get("ActiveChargePresent"),
+            "active_charge_accessible": monta.get("ActiveChargeAccessible"),
+            "charger_state": monta.get("State"),
+        }
+
     def _command_failed(self) -> bool:
         if not self.session_data:
             return False
@@ -130,19 +144,30 @@ class OnIsChargerSwitch(CoordinatorEntity, SwitchEntity):
         """Start charging."""
         if not self.session_data:
             raise HomeAssistantError("Cannot start charging without charger data")
+        if self._authoritative_is_on():
+            return
 
         evse_code = self._get_evse_code()
         conn_id = self.connector_id
-
         monta = self.session_data.get("Monta", {})
-        if monta.get("CanStart") is False:
-            reason = monta.get("CanStartReason") or "not currently allowed"
-            raise HomeAssistantError(f"Monta cannot start charging: {reason}")
+        notification_id = f"on_is_start_{conn_id}"
 
         try:
-            await self.coordinator.client.start_charging(evse_code, conn_id)
+            await self.coordinator.async_start_charging(evse_code, conn_id)
         except Exception as err:
-            raise HomeAssistantError(f"Could not start ON charging: {err}") from err
+            reason = self.coordinator.last_start_error or str(err)
+            advisory = start_readiness(monta)
+            persistent_notification.async_create(
+                self.hass,
+                f"Charging did not start. Monta's prior readiness check said: "
+                f"**{advisory}**. The start request failed with: **{reason}**. "
+                "Check the charger's Start Readiness and Status entities before retrying.",
+                title=f"{self.name}: start failed",
+                notification_id=notification_id,
+            )
+            raise HomeAssistantError(f"Could not start ON charging: {reason}") from err
+
+        persistent_notification.async_dismiss(self.hass, notification_id)
 
         self._override_state = True
         self._override_timestamp = time.time()

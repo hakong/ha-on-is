@@ -23,7 +23,12 @@ from .monta.app import (
     MontaAppContext,
     MontaPayingTeam,
 )
-from .monta.errors import MontaAccessError, MontaApiError
+from .monta.errors import (
+    MontaAccessError,
+    MontaApiError,
+    MontaAuthError,
+    MontaRateLimitError,
+)
 from .monta.hub import MontaHubClient
 from .monta.models import (
     ChargeSession,
@@ -41,6 +46,7 @@ CHARGER_NUMBER_PATTERNS = (
 
 FAILED_CHARGE_VISIBILITY = timedelta(minutes=10)
 HUB_HEALTH_REFRESH_SECONDS = 300
+PAYING_TEAM_REFRESH_SECONDS = 3600
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -118,6 +124,9 @@ class MontaOnIsClient:
         self._last_data: dict[int | str, dict[str, Any]] = {}
         self._last_snapshot: ChargerSnapshot | None = None
         self._active_charge: ChargeSession | None = None
+        self._paying_team_id: str | None = None
+        self._paying_team_last_attempt: float | None = None
+        self._paying_team_error: str | None = None
         self._hub_detail: dict[str, Any] = {}
         self._hub_last_attempt: float | None = None
         self._hub_updated_at: str | None = None
@@ -210,9 +219,10 @@ class MontaOnIsClient:
     async def get_online_data(self) -> list[dict[str, Any]]:
         await self._ensure_target()
         assert self.charge_point_id is not None
+        paying_team_id = await self._get_paying_team_id()
         raw = await self._app.get_charge_point(
             self.charge_point_id,
-            team_id=self.team_id,
+            team_id=paying_team_id or self.team_id,
             mode="instant",
             amount_type="full",
             payment_method="team",
@@ -234,6 +244,28 @@ class MontaOnIsClient:
         )
         self._last_data = {connector_key: data}
         return [data]
+
+    async def _get_paying_team_id(self) -> str | None:
+        """Cache the ON billing team used by the app's eligibility check."""
+        assert self.charge_point_id is not None
+        now = time.monotonic()
+        if (
+            self._paying_team_last_attempt is not None
+            and now - self._paying_team_last_attempt < PAYING_TEAM_REFRESH_SECONDS
+        ):
+            return self._paying_team_id
+        self._paying_team_last_attempt = now
+        try:
+            payer = await self._app.get_default_paying_team(self.charge_point_id)
+        except (MontaAuthError, MontaRateLimitError):
+            raise
+        except (MontaApiError, aiohttp.ClientError, TimeoutError) as err:
+            self._paying_team_error = type(err).__name__
+            _LOGGER.debug("Optional Monta payer refresh failed: %s", err)
+            return self._paying_team_id
+        self._paying_team_id = payer.id if payer else None
+        self._paying_team_error = None
+        return self._paying_team_id
 
     async def _get_hub_detail(self) -> Mapping[str, Any]:
         """Refresh slow-changing Hub health data without affecting core polling."""
@@ -305,6 +337,9 @@ class MontaOnIsClient:
             listed = await self._app.get_active_charge(self.charge_point_id)
             if listed is not None:
                 return await self._app.get_charge(listed.id)
+            # The charger may be occupied by a session this account cannot read.
+            # An old charge must not be mistaken for that active session.
+            return None
 
         candidate = self._active_charge
         if candidate is None:
@@ -362,6 +397,9 @@ class MontaOnIsClient:
         payer = await self._app.get_default_paying_team(self.charge_point_id)
         if payer is None:
             raise ValueError("No eligible ON account payer is available")
+        self._paying_team_id = payer.id
+        self._paying_team_last_attempt = time.monotonic()
+        self._paying_team_error = None
         self._active_charge = await self._app.start_charge(
             self.charge_point_id,
             payer.id,
@@ -373,9 +411,13 @@ class MontaOnIsClient:
     ) -> bool:
         await self._ensure_target()
         assert self.charge_point_id is not None
-        charge = self._active_charge or await self._app.get_active_charge(
-            self.charge_point_id
+        charge = (
+            self._active_charge
+            if self._active_charge and self._active_charge.is_active
+            else None
         )
+        if charge is None:
+            charge = await self._app.get_active_charge(self.charge_point_id)
         if charge is None:
             raise ValueError("No active ON charge is available to stop")
         self._active_charge = await self._app.stop_charge(
@@ -476,6 +518,8 @@ class MontaOnIsClient:
             else {}
         )
         charging_session = _charge_to_legacy_session(live_charge)
+        active_summary = _mapping(raw.get("active_charge"))
+        active_charge_present = bool(active_summary.get("id")) or live_charge is not None
         last_connected_at = _first_value(
             hub_integration.get("last_connected_at"),
             integration.get("last_connected_at"),
@@ -491,9 +535,9 @@ class MontaOnIsClient:
             )
         )
         status_changed = _first_timestamp(
-            charge.stopping_at if charge else None,
-            charge.charging_at if charge else None,
-            charge.starting_at if charge else None,
+            charge.stopping_at if charge and charge.is_active else None,
+            charge.charging_at if charge and charge.is_active else None,
+            charge.starting_at if charge and charge.is_active else None,
             snapshot.last_connected_at,
         )
         result = {
@@ -541,7 +585,6 @@ class MontaOnIsClient:
                     live_charge.state_of_charge if live_charge else None
                 ),
                 "MeterTotal": _first_value(
-                    snapshot.meter_total_kwh,
                     hub.get("total_kwh"),
                     _wh_to_kwh(hub_connector.get("meter_wh")),
                 ),
@@ -557,9 +600,22 @@ class MontaOnIsClient:
                 "Active": snapshot.active,
                 "CablePluggedIn": snapshot.cable_plugged_in,
                 "ActiveChargeId": live_charge.id if live_charge else None,
+                "ActiveChargePresent": active_charge_present,
+                "ActiveChargeAccessible": live_charge is not None,
+                "ActiveChargeSummaryState": active_summary.get("state"),
                 "AverageKw": snapshot.average_kw,
-                "CanStart": snapshot.can_start,
-                "CanStartReason": snapshot.can_start_reason,
+                "CanStart": snapshot.can_start if self._paying_team_id else False,
+                "CanStartReason": (
+                    snapshot.can_start_reason
+                    if self._paying_team_id
+                    else (
+                        "PAYER_LOOKUP_FAILED"
+                        if self._paying_team_error
+                        else "NO_ELIGIBLE_PAYER"
+                    )
+                ),
+                "PayingTeamAvailable": self._paying_team_id is not None,
+                "PayerLookupError": self._paying_team_error,
                 "CanStop": live_charge.can_stop if live_charge else False,
                 "CanUnlock": charge.can_unlock if charge else False,
                 "CpiStatus": charge.cpi_status if charge else None,
@@ -740,19 +796,25 @@ def _friendly_status(
     if snapshot.connected is False or snapshot.state == "disconnected":
         return "Disconnected"
     if charge is not None:
-        if charge.has_failed:
+        if charge.has_failed and _is_recent_failure(charge):
             return "Failed"
-        state = (charge.state or "").lower()
-        if charge.stopping_at is not None or state == "stopping":
-            return "Stopping"
-        if state == "charging":
-            return "Charging"
-        if state == "paused":
-            return "Suspended EV"
-        if state in {"starting", "reserved", "scheduled"}:
-            return state.replace("_", " ").title()
-        if state:
-            return state.replace("_", " ").title()
+        if charge.is_active:
+            state = (charge.state or "").lower()
+            if charge.stopping_at is not None or state == "stopping":
+                return "Stopping"
+            if state == "charging":
+                return "Charging"
+            if state == "paused":
+                return "Suspended EV"
+            if state in {"starting", "reserved", "scheduled"}:
+                return state.replace("_", " ").title()
+            if state:
+                return state.replace("_", " ").title()
+    if snapshot.state == "busy-charging":
+        return "Charging"
+    if snapshot.state == "busy-non-charging":
+        active = _mapping(snapshot.raw.get("active_charge"))
+        return "Busy (paused)" if active.get("state") == "paused" else "Busy (not charging)"
     if snapshot.cable_plugged_in is True:
         return "Preparing"
     if snapshot.state:
