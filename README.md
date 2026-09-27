@@ -30,7 +30,10 @@ Etrel OCEAN client remains in the source only as a compatibility building block.
   using the existing ON app session.
 * **History:** State, cost, energy, duration, payment, failure and receipt
   metadata for the latest session or charging attempt.
-* **Control:** Account-credit start/stop and explicit cable release actions.
+* **Control:** Account-credit start/stop and a release button that remains
+  available. Pressing Release Cable stops a charge owned by this account,
+  waits for Monta to confirm it stopped, then requests unlock. If another
+  account owns the charge, Monta does not allow this account to stop it.
   A Start Readiness sensor shows Monta's current eligibility reason before you
   act. This is advisory: an explicit start request is still sent even when
   Monta's preview says unavailable. A rejected request creates a Home Assistant

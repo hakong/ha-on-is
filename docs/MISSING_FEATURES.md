@@ -44,6 +44,8 @@ For the complete captured app/API inventory and implementation status, see
   list is empty and Hub returns 403 for that charge. The integration shows
   occupancy and its summary state, but cannot identify the start source,
   billing account, live energy/power, or stop such a session from this login.
+  Release Cable stays pressable, but refuses to unlock an occupied charger when
+  this account cannot stop its active session.
 * Last communication uses Monta's latest measurement/update/connection time.
   Monta does not expose the old OCEAN heartbeat field with identical semantics.
 * The signed-in app bearer can read Hub charger detail, so protocol errors,

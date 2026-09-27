@@ -86,7 +86,7 @@ class FakeAppClient:
 
     async def get_charge_point(self, charge_point_id, **kwargs):
         self.calls.append(("detail", str(charge_point_id), kwargs))
-        return {
+        point = {
             "id": 6440650,
             "name": "ON 3806-1",
             "state": "busy-charging",
@@ -115,10 +115,14 @@ class FakeAppClient:
             "model": {"brand": "Zaptec", "name": "Zaptec Pro"},
             "connectors": [{"name": "Type 2"}],
         }
+        if self.active is None or not self.active.is_active:
+            point.update({"state": "available", "available": True,
+                          "active": False, "active_charge": None})
+        return point
 
     async def get_active_charge(self, charge_point_id):
         self.calls.append(("active", str(charge_point_id)))
-        return self.active
+        return self.active if self.active and self.active.is_active else None
 
     async def get_charge(self, charge_id):
         self.calls.append(("charge_detail", str(charge_id)))
@@ -138,7 +142,8 @@ class FakeAppClient:
 
     async def stop_charge(self, charge_id, charge_point_id):
         self.calls.append(("stop", str(charge_id), str(charge_point_id)))
-        return _charge(charge_id, "charging")
+        self.active = _charge(charge_id, "completed")
+        return self.active
 
     async def release_cable(self, charge_point_id, integration_id):
         self.calls.append(
@@ -273,6 +278,79 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
             ("stop", "889565977676087673", "6440650"), app.calls
         )
         self.assertIn(("release", "6440650", "17386972"), app.calls)
+
+    async def test_release_waits_for_charge_to_finish_before_unlocking(self):
+        class DelayedStopApp(FakeAppClient):
+            def __init__(self):
+                super().__init__()
+                self.polls = 0
+
+            async def stop_charge(self, charge_id, charge_point_id):
+                self.calls.append(("stop", str(charge_id), str(charge_point_id)))
+                return _charge(charge_id, "charging")
+
+            async def get_charge(self, charge_id):
+                self.calls.append(("charge_detail", str(charge_id)))
+                self.polls += 1
+                return _charge(charge_id, "completed" if self.polls == 2 else "charging")
+
+        app = DelayedStopApp()
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app, charge_point_id=6440650,
+        )
+        with patch("custom_components.on_is.monta_backend.asyncio.sleep") as sleep:
+            await client.release_cable()
+
+        self.assertEqual(sleep.await_count, 2)
+        self.assertEqual(
+            [call[0] for call in app.calls],
+            ["teams", "detail", "active", "stop", "charge_detail",
+             "charge_detail", "release"],
+        )
+
+    async def test_release_idle_charger_ignores_unlock_preview(self):
+        app = FakeAppClient()
+        app.active = None
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app, charge_point_id=6440650,
+        )
+
+        await client.release_cable()
+
+        self.assertFalse(any(call[0] == "stop" for call in app.calls))
+        self.assertIn(("release", "6440650", "17386972"), app.calls)
+
+    async def test_release_cannot_stop_another_accounts_charge(self):
+        class OccupiedApp(FakeAppClient):
+            async def get_active_charge(self, charge_point_id):
+                self.calls.append(("active", str(charge_point_id)))
+                return None
+
+        app = OccupiedApp()
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app, charge_point_id=6440650,
+        )
+
+        with self.assertRaisesRegex(ValueError, "this account cannot stop"):
+            await client.release_cable()
+
+        self.assertFalse(any(call[0] in {"stop", "release"} for call in app.calls))
+
+    async def test_release_does_not_unlock_when_stop_remains_pending(self):
+        class PendingStopApp(FakeAppClient):
+            async def stop_charge(self, charge_id, charge_point_id):
+                self.calls.append(("stop", str(charge_id), str(charge_point_id)))
+                return _charge(charge_id, "charging")
+
+        app = PendingStopApp()
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app, charge_point_id=6440650,
+        )
+        with patch("custom_components.on_is.monta_backend.asyncio.sleep"):
+            with self.assertRaisesRegex(TimeoutError, "was not released"):
+                await client.release_cable()
+
+        self.assertFalse(any(call[0] == "release" for call in app.calls))
 
     def test_exports_reusable_login_session(self):
         client = MontaOnIsClient(

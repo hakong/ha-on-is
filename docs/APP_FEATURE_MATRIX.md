@@ -22,7 +22,7 @@ Status legend:
 | Observe asynchronous start failure | `GET /api/v1/charges/{id}` | Failed charge can be `state=completed` with `failed_at` and `error` | Yes | Yes; status and latest-session state/error |
 | Save charging defaults after start | `PUT /api/v1/users/charge_point_settings` | 2 successful writes | Client | No |
 | Stop charging | `POST /api/v1/charges/{id}/stop` | 1 successful asynchronous stop | Yes | Yes; charging switch |
-| Release cable | `GET /api/v1/charge_points/{id}/integrations/{id}/unlock` | 1 successful unlock | Yes | Yes; release-cable button |
+| Release cable | `GET /api/v1/charge_points/{id}/integrations/{id}/unlock` | 1 successful unlock | Yes | Yes; button stops an accessible active charge, waits for completion, then requests unlock |
 | View charging sessions | `GET /api/v1/charges` and `/charges/{id}` | History and detail loaded repeatedly | Yes | Partial; active and latest completed session |
 | View receipt | `GET /api/v1/wallet/receipts/charges/{id}` | Receipt metadata returned | Client | Partial; availability and charge ID only |
 | Download receipt PDF | `GET /wallet/receipts/{uuid}/download` | Redirected to download | No | No |

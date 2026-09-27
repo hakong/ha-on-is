@@ -37,7 +37,7 @@ async def async_setup_entry(
 
 
 class OnIsReleaseCableButton(CoordinatorEntity, ButtonEntity):
-    """Request that the charger unlock its cable."""
+    """Stop an accessible charge and request cable unlock."""
 
     _attr_icon = "mdi:ev-plug-type2"
 
@@ -56,12 +56,10 @@ class OnIsReleaseCableButton(CoordinatorEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        if not super().available or not self.session_data:
-            return False
-        return self.session_data.get("Monta", {}).get("CanUnlock") is True
+        return True
 
     async def async_press(self) -> None:
-        """Release the connector after an explicit user action."""
+        """Stop charging if needed, then release the connector."""
         try:
             await self.coordinator.async_release_cable()
         except Exception as err:

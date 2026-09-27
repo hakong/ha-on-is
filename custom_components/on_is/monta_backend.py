@@ -1,6 +1,7 @@
 """ON backend adapter for the private signed-in Monta app API."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
@@ -47,6 +48,8 @@ CHARGER_NUMBER_PATTERNS = (
 FAILED_CHARGE_VISIBILITY = timedelta(minutes=10)
 HUB_HEALTH_REFRESH_SECONDS = 300
 PAYING_TEAM_REFRESH_SECONDS = 3600
+STOP_POLL_SECONDS = 3
+STOP_POLL_ATTEMPTS = 10
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -427,16 +430,41 @@ class MontaOnIsClient:
         return True
 
     async def release_cable(self) -> bool:
-        """Explicitly request connector unlock for the configured charger."""
+        """Stop this account's charge before requesting connector unlock."""
         await self._ensure_target()
-        if self._last_snapshot is None or self._last_snapshot.integration_id is None:
-            await self.get_online_data()
         assert self.charge_point_id is not None
-        if self._last_snapshot is None or self._last_snapshot.integration_id is None:
+        raw = await self._app.get_charge_point(
+            self.charge_point_id, includes=("integration",)
+        )
+        snapshot = ChargerSnapshot.from_app(raw)
+        if snapshot.integration_id is None:
             raise ValueError("Monta did not provide a charger integration ID")
+        charge = await self._app.get_active_charge(self.charge_point_id)
+        if charge is not None:
+            if charge.stopping_at is None and charge.state != "stopping":
+                charge = await self._app.stop_charge(charge.id, self.charge_point_id)
+            self._active_charge = charge
+            for _ in range(STOP_POLL_ATTEMPTS):
+                if not charge.is_active:
+                    break
+                await asyncio.sleep(STOP_POLL_SECONDS)
+                charge = await self._app.get_charge(charge.id)
+                self._active_charge = charge
+            if charge.is_active:
+                raise TimeoutError(
+                    "Monta did not confirm charging stopped within 30 seconds; "
+                    "the cable was not released"
+                )
+        elif snapshot.active_charge_id or snapshot.state in {
+            "busy-charging", "busy-non-charging"
+        }:
+            raise ValueError(
+                "The charger is occupied by a session this account cannot stop; "
+                "the cable was not released"
+            )
         await self._app.release_cable(
             self.charge_point_id,
-            self._last_snapshot.integration_id,
+            snapshot.integration_id,
         )
         return True
 
