@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
+from homeassistant.helpers.storage import Store
 
 from .backends import OnIsBackendClient
 from .const import (
@@ -26,6 +28,7 @@ from .helpers import (
     evse_codes_match,
     extract_evse_code,
     rate_limit_backoff_seconds,
+    merge_session_history,
 )
 from .monta.errors import MontaApiError, MontaAuthError, MontaRateLimitError
 
@@ -36,11 +39,17 @@ class OnIsCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, client: OnIsBackendClient, entry: ConfigEntry) -> None:
         """Initialize."""
+        coordinator_options = (
+            {"config_entry": entry}
+            if "config_entry" in inspect.signature(DataUpdateCoordinator).parameters
+            else {}
+        )
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
+            **coordinator_options,
         )
         self.client = client
         self.entry = entry
@@ -48,6 +57,8 @@ class OnIsCoordinator(DataUpdateCoordinator):
         self._rate_limit_failures = 0
         self._normal_update_interval = timedelta(seconds=SCAN_INTERVAL_SECONDS)
         self._cached_history = {}
+        self._history_store = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.history")
+        self._saved_history = {}
         self._cached_last_communication: dict[int, str] = {}
         self.backend_key = client.backend_key
         self.backend_name = client.backend_name
@@ -58,6 +69,24 @@ class OnIsCoordinator(DataUpdateCoordinator):
         self.last_start_attempt_at: str | None = None
         self.last_start_result: str | None = None
         self.last_start_error: str | None = None
+
+    async def async_load_history(self) -> None:
+        """Restore terminal-session diagnostics without restoring live state."""
+        if self.backend_key != BACKEND_MONTA_APP:
+            return
+        saved = await self._history_store.async_load()
+        if isinstance(saved, dict):
+            self._saved_history = saved
+            for item in saved.values():
+                if isinstance(item, dict):
+                    connector_id = item.get("Connector", {}).get("Id")
+                    if connector_id is not None:
+                        self._cached_history[connector_id] = item
+
+    def _cache_history(self, connector_id, item) -> None:
+        self._cached_history[connector_id] = merge_session_history(
+            self._cached_history.get(connector_id, {}), item
+        )
 
     async def async_start_charging(self, evse_code: str, connector_id: int | str) -> None:
         """Send an explicit start request and retain its outcome for the UI."""
@@ -106,7 +135,8 @@ class OnIsCoordinator(DataUpdateCoordinator):
             for conn_id, session in data_map.items():
                 latest_session = session.get("LastSessionData")
                 if latest_session:
-                    self._cached_history[conn_id] = latest_session
+                    self._cache_history(conn_id, latest_session)
+                    session["LastSessionData"] = self._cached_history[conn_id]
                 elif conn_id in self._cached_history:
                     session["LastSessionData"] = self._cached_history[conn_id]
                 apply_cached_last_communication(
@@ -114,6 +144,12 @@ class OnIsCoordinator(DataUpdateCoordinator):
                     session,
                     self._cached_last_communication,
                 )
+
+            if self.backend_key == BACKEND_MONTA_APP:
+                saved = {str(key): value for key, value in self._cached_history.items()}
+                if saved != self._saved_history:
+                    await self._history_store.async_save(saved)
+                    self._saved_history = saved
 
             # 5. Filter Results
             self.last_successful_update = datetime.now(timezone.utc).isoformat()
@@ -187,7 +223,7 @@ class OnIsCoordinator(DataUpdateCoordinator):
             for item in history:
                 h_conn_id = item.get("Connector", {}).get("Id")
                 if h_conn_id and h_conn_id not in seen_connectors:
-                    self._cached_history[h_conn_id] = item
+                    self._cache_history(h_conn_id, item)
                     seen_connectors.add(h_conn_id)
         except (MontaAuthError, MontaRateLimitError):
             raise

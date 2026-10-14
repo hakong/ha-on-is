@@ -23,6 +23,18 @@ Etrel OCEAN client remains in the source only as a compatibility building block.
   has not been released. The Status sensor retains the raw `monta_state`
   attribute; cable connection and start eligibility are separate signals.
 * **Live monitoring:** Power, session energy, session cost, price and duration.
+* **Session diagnostics:** Previous Session State describes the last terminal
+  session, not an active charge. Its session ID, timestamps, exact failure code,
+  and readable error details are retained across summary refreshes and restarts.
+  Existing entity IDs are unchanged. The Status sensor describes the current
+  session and also exposes `failure_code` when a failure is reported.
+* **Optional start retries:** [Example automation](examples/auto_start_with_retries.yaml)
+  makes up to three attempts for confirmed `StartTransactionTimeout` failures,
+  waits at least 60 seconds between attempts, and notifies on retries, recovery,
+  or unsuccessful starts. It checks fresh cloud state and never retries a paused
+  or active session, payment rejection, unplugged cable, or uncertain outcome.
+  Adapt its entity IDs and notification service to your installation. HACS
+  installs the integration only; it does not install or overwrite automations.
 * **Connection detail:** Separate cable-connected and cloud-connected binary
   sensors. Charger Last Connected to Monta records the charger's last reported
   connection event. Last Charge Point Data Update tracks the latest available

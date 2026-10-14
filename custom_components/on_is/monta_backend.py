@@ -392,6 +392,16 @@ class MontaOnIsClient:
                 continue
             if charge.state and charge.state.lower() not in TERMINAL_CHARGE_STATES:
                 continue
+            if not history:
+                try:
+                    detail = await self._app.get_charge(charge.id)
+                    if detail.id == charge.id and not detail.is_active:
+                        charge = detail
+                except (MontaAuthError, MontaRateLimitError):
+                    raise
+                except (MontaApiError, aiohttp.ClientError, TimeoutError):
+                    # Summary history still works when optional rich detail fails.
+                    pass
             history.append(self._history_to_legacy(charge))
         return history[:limit]
 
@@ -650,6 +660,7 @@ class MontaOnIsClient:
                 "CpiStatus": charge.cpi_status if charge else None,
                 "ChargeState": charge.normalized_state if charge else None,
                 "FailedAt": _iso(charge.failed_at) if charge else None,
+                "FailureCode": charge.failure_reason if charge else None,
                 "FailureReason": _charge_failure_reason(charge),
                 "StopReason": charge.stop_reason if charge else None,
                 "ErrorTitle": _charge_error_text(charge, "title"),
@@ -775,6 +786,7 @@ class MontaOnIsClient:
             "Currency": charge.currency,
             "StopReason": charge.stop_reason,
             "FailureReason": _charge_failure_reason(charge),
+            "FailureCode": charge.failure_reason,
             "FailedAt": _iso(charge.failed_at),
             "ErrorTitle": _charge_error_text(charge, "title"),
             "ErrorDescription": _charge_error_text(
@@ -884,9 +896,9 @@ def _charge_failure_reason(charge: ChargeSession | None) -> str | None:
     """Return Monta's explicit reason or its human-readable fallback."""
     if charge is None or not charge.has_failed:
         return None
-    return charge.failure_reason or _charge_error_text(
+    return _charge_error_text(
         charge, "description", "message", "title"
-    )
+    ) or charge.failure_reason
 
 
 def _charge_to_legacy_session(charge: ChargeSession | None) -> dict[str, Any]:

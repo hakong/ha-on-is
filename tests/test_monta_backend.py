@@ -279,6 +279,33 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(("release", "6440650", "17386972"), app.calls)
 
+    async def test_history_fetches_rich_error_for_latest_terminal_session(self):
+        class FailedHistoryApp(FakeAppClient):
+            async def list_charge_sessions(self, **kwargs):
+                return models.MontaPage(items=(models.ChargeSession.from_payload({
+                    "id": "failed-session", "state": "completed",
+                    "failed_reason": "StartTransactionTimeout",
+                    "charge_point_info": {"id": 6440650},
+                }),))
+
+            async def get_charge(self, charge_id):
+                self.calls.append(("charge_detail", charge_id))
+                return models.ChargeSession.from_payload({
+                    "id": charge_id, "state": "completed",
+                    "failed_reason": "StartTransactionTimeout",
+                    "error": {"title": "Start transaction timeout",
+                              "description": "Could not start charging."},
+                })
+
+        app = FailedHistoryApp()
+        client = MontaOnIsClient("user@example.com", "secret", app_client=app,
+                                charge_point_id=6440650, team_id=42)
+        history = await client.get_charging_history()
+        self.assertEqual(history[0]["FailureCode"], "StartTransactionTimeout")
+        self.assertEqual(history[0]["FailureReason"], "Could not start charging.")
+        self.assertEqual(history[0]["ErrorTitle"], "Start transaction timeout")
+        self.assertEqual(history[0]["State"], "failed")
+
     async def test_release_waits_for_charge_to_finish_before_unlocking(self):
         class DelayedStopApp(FakeAppClient):
             def __init__(self):

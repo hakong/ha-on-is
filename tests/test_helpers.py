@@ -29,6 +29,33 @@ LAST_COMMUNICATION_TIME_CACHED = helpers.LAST_COMMUNICATION_TIME_CACHED
 
 
 class HelperTests(unittest.TestCase):
+    def test_sparse_history_retains_diagnostics_only_for_same_session(self):
+        previous = {"Id": "123", "FailureCode": "StartTransactionTimeout",
+                    "ErrorTitle": "Start transaction timeout", "TotalCosts": 0}
+        incoming = {"Id": "123", "FailureCode": None, "ErrorTitle": None,
+                    "TotalCosts": 1}
+        merged = helpers.merge_session_history(previous, incoming)
+        self.assertEqual(merged["FailureCode"], "StartTransactionTimeout")
+        self.assertEqual(merged["ErrorTitle"], "Start transaction timeout")
+        self.assertEqual(merged["TotalCosts"], 1)
+        self.assertIsNone(incoming["ErrorTitle"])
+        self.assertEqual(helpers.merge_session_history(previous, {"Id": "124"}),
+                         {"Id": "124"})
+
+    def test_new_explicit_diagnostic_replaces_cached_value(self):
+        merged = helpers.merge_session_history(
+            {"Id": "123", "ErrorTitle": "Old"},
+            {"Id": "123", "ErrorTitle": "New"},
+        )
+        self.assertEqual(merged["ErrorTitle"], "New")
+
+    def test_code_only_summary_does_not_erase_readable_failure(self):
+        merged = helpers.merge_session_history(
+            {"Id": "123", "FailureReason": "Could not start charging."},
+            {"Id": "123", "FailureCode": "StartTransactionTimeout",
+             "FailureReason": "StartTransactionTimeout"},
+        )
+        self.assertEqual(merged["FailureReason"], "Could not start charging.")
     def test_extract_evse_code_prefers_connector_evse_code(self):
         session = {"Connector": {"EvseCode": "IS*ONP001-1-1"}}
 

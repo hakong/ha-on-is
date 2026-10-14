@@ -39,6 +39,22 @@ def monta_state_label(state: str) -> str:
     )
 
 
+def merge_session_history(previous: Mapping[str, Any], incoming: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep rich diagnostics when the same session arrives as a sparse summary."""
+    merged = dict(incoming)
+    if previous.get("Id") and str(previous["Id"]) == str(incoming.get("Id")):
+        for key in ("FailureCode", "FailureReason", "FailedAt", "StopReason",
+                    "ErrorTitle", "ErrorDescription"):
+            if merged.get(key) in (None, "") and previous.get(key) not in (None, ""):
+                merged[key] = previous[key]
+        if (incoming.get("FailureCode")
+                and incoming.get("FailureReason") == incoming["FailureCode"]
+                and previous.get("FailureReason")
+                and previous["FailureReason"] != incoming["FailureCode"]):
+            merged["FailureReason"] = previous["FailureReason"]
+    return merged
+
+
 def elapsed_minutes_since(
     timestamp: datetime | None, now: datetime | None = None
 ) -> int | None:

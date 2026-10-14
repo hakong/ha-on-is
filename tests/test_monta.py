@@ -320,6 +320,14 @@ class MontaModelTests(unittest.TestCase):
         self.assertFalse(session.is_active)
         self.assertEqual(session.normalized_state, "failed")
 
+    def test_app_failed_reason_is_preserved(self):
+        session = models.ChargeSession.from_payload({
+            "id": "failed-session", "state": "completed",
+            "failed_reason": "StartTransactionTimeout",
+        })
+        self.assertEqual(session.failure_reason, "StartTransactionTimeout")
+        self.assertEqual(session.normalized_state, "failed")
+
     def test_large_entity_ids_are_exposed_as_opaque_strings(self):
         exact_id = 889559095101176797
         rounded_private_id = 889559095101176800

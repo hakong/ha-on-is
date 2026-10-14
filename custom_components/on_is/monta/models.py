@@ -437,7 +437,7 @@ class ChargeSession:
             payment_method=_text(payload, "paymentMethod", "payment_method"),
             stop_reason=_text(payload, "stopReason", "stop_reason"),
             failure_reason=_text(
-                payload, "failureReason", "failure_reason", "failedReason"
+                payload, "failureReason", "failure_reason", "failedReason", "failed_reason"
             ),
             can_stop=_boolean(payload, "canStop", "can_stop"),
             cpi_status=_text(payload, "cpiStatus", "cpi_status"),

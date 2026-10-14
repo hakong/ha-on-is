@@ -1,0 +1,161 @@
+id: '1764272875128'
+alias: Auto-Start ON Charger
+description: >-
+  Authorize on plug-in; retry only confirmed Monta start transaction timeouts,
+  at most twice, and notify Hakon about retries or unsuccessful starts.
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.on_charger_3806_cable_connected
+    from: 'off'
+    to: 'on'
+conditions: []
+actions:
+  - repeat:
+      count: 3
+      sequence:
+        - choose:
+            - conditions: "{{ not is_state('binary_sensor.on_charger_3806_cable_connected', 'on') }}"
+              sequence:
+                - action: notify.hakon
+                  continue_on_error: true
+                  data:
+                    title: ON charging cancelled
+                    message: Cable is disconnected or its state is unavailable; no further start attempts will be made.
+                - stop: Cable disconnected
+            - conditions: >-
+                {{ states('sensor.on_charger_3806_status') in ['unknown', 'unavailable']
+                   or now().timestamp() - as_timestamp(state_attr('sensor.on_charger_3806_status', 'last_successful_update'), 0) > 90 }}
+              sequence:
+                - action: notify.hakon
+                  continue_on_error: true
+                  data:
+                    title: ON charging needs attention
+                    message: Cloud status is unavailable or stale. Not retrying because the session outcome is uncertain.
+                - stop: Cloud state is not fresh
+            - conditions: >-
+                {{ state_attr('sensor.on_charger_3806_status', 'active_charge_present') != false
+                   or state_attr('sensor.on_charger_3806_status', 'monta_state') != 'available' }}
+              sequence:
+                - action: notify.hakon
+                  continue_on_error: true
+                  data:
+                    title: ON charging needs attention
+                    message: >-
+                      No additional start sent: {{ states('sensor.on_charger_3806_status') }}.
+                      {{ states('sensor.on_charger_3806_start_readiness') }}.
+                      An active, occupied, or otherwise unavailable charger will not be retried.
+                - stop: Charger is not idle and available
+        - variables:
+            attempt_started: "{{ now().timestamp() }}"
+            previous_session_id: "{{ state_attr('sensor.on_charger_3806_last_session_state', 'charge_id') }}"
+        - action: switch.turn_on
+          continue_on_error: true
+          target:
+            entity_id: switch.on_charger_3806_charging
+        - if: >-
+            {{ state_attr('sensor.on_charger_3806_start_readiness', 'last_start_result') == 'rejected'
+               and as_timestamp(state_attr('sensor.on_charger_3806_start_readiness', 'last_start_attempt_at'), 0) >= attempt_started | float }}
+          then:
+            - action: notify.hakon
+              continue_on_error: true
+              data:
+                title: ON start request rejected
+                message: >-
+                  {{ state_attr('sensor.on_charger_3806_start_readiness', 'last_start_error')
+                     or 'Monta rejected the request.' }} No automatic retry.
+            - stop: Start request rejected
+        - wait_template: >-
+            {{ not is_state('binary_sensor.on_charger_3806_cable_connected', 'on')
+               or (is_state('sensor.on_charger_3806_status', 'Charging')
+                   and state_attr('sensor.on_charger_3806_status', 'active_charge_id') not in [none, ''])
+               or (is_state('sensor.on_charger_3806_last_session_state', 'failed')
+                   and state_attr('sensor.on_charger_3806_last_session_state', 'charge_id') != previous_session_id
+                   and as_timestamp(state_attr('sensor.on_charger_3806_last_session_state', 'failed_at'), 0) >= attempt_started | float - 2) }}
+          timeout: '00:05:00'
+          continue_on_timeout: true
+        - choose:
+            - conditions: "{{ not is_state('binary_sensor.on_charger_3806_cable_connected', 'on') }}"
+              sequence:
+                - action: notify.hakon
+                  continue_on_error: true
+                  data:
+                    title: ON charging cancelled
+                    message: Cable is disconnected or its state is unavailable; no further start attempts will be made.
+                - stop: Cable disconnected
+            - conditions: >-
+                {{ is_state('sensor.on_charger_3806_status', 'Charging')
+                   and state_attr('sensor.on_charger_3806_status', 'active_charge_id') not in [none, ''] }}
+              sequence:
+                - action: persistent_notification.dismiss
+                  continue_on_error: true
+                  data:
+                    notification_id: on_charger_3806_start_failed
+                - if: "{{ repeat.index > 1 }}"
+                  then:
+                    - action: notify.hakon
+                      continue_on_error: true
+                      data:
+                        title: ON charging started
+                        message: "Charging confirmed on attempt {{ repeat.index }} of 3."
+                - stop: Charging confirmed
+            - conditions: "{{ not wait.completed }}"
+              sequence:
+                - action: notify.hakon
+                  continue_on_error: true
+                  data:
+                    title: ON charging needs attention
+                    message: >-
+                      No confirmed charging or failed session after five minutes.
+                      Current status: {{ states('sensor.on_charger_3806_status') }}.
+                      Not retrying an uncertain or paused session; check the ON app.
+                - stop: Session outcome uncertain
+        - variables:
+            failure_code: "{{ state_attr('sensor.on_charger_3806_last_session_state', 'failure_code') or 'Unknown' }}"
+            failure_message: >-
+              {{ state_attr('sensor.on_charger_3806_last_session_state', 'error_title')
+                 or state_attr('sensor.on_charger_3806_last_session_state', 'failure_reason')
+                 or 'No error description supplied by Monta' }}
+        - if: "{{ failure_code != 'StartTransactionTimeout' or repeat.index == 3 }}"
+          then:
+            - action: notify.hakon
+              continue_on_error: true
+              data:
+                title: ON charging failed
+                message: >-
+                  Attempt {{ repeat.index }} of 3 failed: {{ failure_message }}
+                  ({{ failure_code }}). {{ 'All retries exhausted.' if repeat.index == 3 else 'This error is not automatically retried.' }}
+            - action: persistent_notification.create
+              data:
+                notification_id: on_charger_3806_start_failed
+                title: ON charging failed
+                message: >-
+                  Attempt {{ repeat.index }} of 3: {{ failure_message }} ({{ failure_code }}).
+                  Check the ON app. Session: {{ state_attr('sensor.on_charger_3806_last_session_state', 'charge_id') }}.
+            - stop: Confirmed failure; retries stopped
+        - action: notify.hakon
+          continue_on_error: true
+          data:
+            title: ON charging retry
+            message: >-
+              Attempt {{ repeat.index }} failed: {{ failure_message }} ({{ failure_code }}).
+              Waiting 60 seconds before attempt {{ repeat.index + 1 }} of 3.
+        - delay: '00:01:00'
+        - variables:
+            retry_not_before: "{{ now().timestamp() }}"
+        - wait_template: >-
+            {{ not is_state('binary_sensor.on_charger_3806_cable_connected', 'on')
+               or as_timestamp(state_attr('sensor.on_charger_3806_status', 'last_successful_update'), 0) >= retry_not_before | float }}
+          timeout: '00:01:30'
+          continue_on_timeout: true
+        - if: "{{ not wait.completed }}"
+          then:
+            - action: notify.hakon
+              continue_on_error: true
+              data:
+                title: ON charging needs attention
+                message: Could not obtain fresh cloud status before retrying. No further start sent.
+            - stop: No fresh cloud status
+mode: single
+max_exceeded: silent
+trace:
+  stored_traces: 10

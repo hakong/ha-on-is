@@ -166,6 +166,7 @@ class OnIsStatusSensor(OnIsBaseSensor, SensorEntity):
             "charge_state": monta.get("ChargeState"),
             "failed_at": monta.get("FailedAt"),
             "failure_reason": monta.get("FailureReason"),
+            "failure_code": monta.get("FailureCode"),
             "stop_reason": monta.get("StopReason"),
             "error_title": monta.get("ErrorTitle"),
             "error_description": monta.get("ErrorDescription"),
@@ -867,13 +868,13 @@ class OnIsLastSessionCostSensor(OnIsBaseSensor, SensorEntity):
 
 
 class OnIsLastSessionStateSensor(OnIsBaseSensor, SensorEntity):
-    """State and result details for the most recent charging attempt."""
+    """State and result details for the previous terminal session."""
 
     _attr_icon = "mdi:ev-station"
 
     def __init__(self, coordinator, connector_id, session):
         super().__init__(coordinator, connector_id, session)
-        self._attr_name = f"{super().name} Last Session State"
+        self._attr_name = f"{super().name} Previous Session State"
         self._attr_unique_id = f"{super().unique_id}_last_state"
 
     @property
@@ -890,6 +891,10 @@ class OnIsLastSessionStateSensor(OnIsBaseSensor, SensorEntity):
         return {
             "charge_id": hist.get("Id"),
             "failed_at": hist.get("FailedAt"),
+            "failure_code": hist.get("FailureCode"),
+            "session_start": hist.get("ConnectedFrom"),
+            "charging_start": hist.get("ChargingFrom"),
+            "session_end": hist.get("ConnectedTo"),
             "failure_reason": hist.get("FailureReason"),
             "stop_reason": hist.get("StopReason"),
             "error_title": hist.get("ErrorTitle"),

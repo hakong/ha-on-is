@@ -95,6 +95,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     coordinator = OnIsCoordinator(hass, client, entry)
+    await coordinator.async_load_history()
     await coordinator.async_config_entry_first_refresh()
 
     resolved_data = dict(entry.data)
