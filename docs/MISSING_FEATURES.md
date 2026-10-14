@@ -40,6 +40,11 @@ For the complete captured app/API inventory and implementation status, see
   its reason in Start Readiness, and still sends an explicit user start request.
   A synchronous rejection is shown in a persistent notification; an accepted
   request can still fail asynchronously and must be confirmed by Status/power.
+* Charge-point states such as `busy-non-released` are displayed without
+  inferring successful charging, a physical lock, or the action needed to
+  release the charger. A session's `paused` state does not identify whether
+  the vehicle or charger caused the pause. The raw API states remain in the
+  Status sensor attributes.
 * Monta can report an occupied charger while the signed-in app's active-charge
   list is empty and Hub returns 403 for that charge. The integration shows
   occupancy and its summary state, but cannot identify the start source,

@@ -10,7 +10,7 @@ from test_monta import models
 
 from custom_components.on_is.monta.app import MontaPayingTeam
 from custom_components.on_is.monta.errors import MontaAccessError
-from custom_components.on_is.monta_backend import MontaOnIsClient
+from custom_components.on_is.monta_backend import MontaOnIsClient, _friendly_status
 
 
 def _charge(charge_id="889565977676087673", state="charging"):
@@ -503,6 +503,70 @@ class MontaBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["Connector"]["Status"]["Title"], "Preparing")
         self.assertEqual(data["ChargingSession"], {})
         self.assertEqual(data["LastSessionData"]["State"], "completed")
+
+    async def test_not_released_state_retains_raw_value_with_cable_connected(self):
+        class NotReleasedApp(FakeAppClient):
+            async def get_charge_point(self, charge_point_id, **kwargs):
+                point = await super().get_charge_point(charge_point_id, **kwargs)
+                point.update({"state": "busy-non-released", "available": False,
+                              "active": True, "active_charge": None})
+                point["integration"]["status"] = "Finishing"
+                point["details"].update({"can_start": False,
+                                         "can_start_reason": "NOT_AVAILABLE"})
+                return point
+
+            async def list_charge_sessions(self, **kwargs):
+                return models.MontaPage(items=())
+
+        app = NotReleasedApp()
+        app.active = None
+        client = MontaOnIsClient(
+            "user@example.com", "secret", app_client=app, charge_point_id=6440650,
+        )
+
+        data = (await client.get_online_data())[0]
+
+        self.assertEqual(data["Connector"]["Status"]["Title"], "Busy (not released)")
+        self.assertEqual(data["Monta"]["State"], "busy-non-released")
+        self.assertEqual(data["Monta"]["IntegrationStatus"], "Finishing")
+        self.assertTrue(data["Monta"]["CablePluggedIn"])
+        self.assertFalse(data["Monta"]["CanStart"])
+        self.assertEqual(data["Monta"]["CanStartReason"], "NOT_AVAILABLE")
+        self.assertEqual(data["ChargingSession"], {})
+
+    def test_cable_presence_does_not_mask_reported_charger_states(self):
+        cases = {
+            "available": "Preparing",
+            "busy": "Busy",
+            "busy-blocked": "Busy (blocked)",
+            "busy-non-charging": "Busy (not charging)",
+            "busy-non-released": "Busy (not released)",
+            "busy-reserved": "Busy (reserved)",
+            "busy-scheduled": "Busy (scheduled)",
+            "error": "Error",
+            "maintenance": "Maintenance",
+            "passive": "Passive",
+            "other": "Other",
+            "future-state": "Future State",
+        }
+        for state, expected in cases.items():
+            with self.subTest(state=state):
+                snapshot = models.ChargerSnapshot(
+                    id="6443017", state=state, cable_plugged_in=True,
+                )
+                self.assertEqual(_friendly_status(snapshot, None), expected)
+        self.assertEqual(
+            _friendly_status(models.ChargerSnapshot(
+                id="6443017", cable_plugged_in=True,
+            ), None),
+            "Preparing",
+        )
+
+    def test_paused_session_does_not_infer_vehicle_as_cause(self):
+        snapshot = models.ChargerSnapshot(
+            id="6443017", state="busy-non-charging", cable_plugged_in=True,
+        )
+        self.assertEqual(_friendly_status(snapshot, _charge(state="paused")), "Paused")
 
     async def test_unreadable_active_charge_is_occupied_not_preparing(self):
         class OtherSessionApp(FakeAppClient):

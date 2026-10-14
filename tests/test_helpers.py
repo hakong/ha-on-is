@@ -93,6 +93,21 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(elapsed_minutes_since(now - timedelta(minutes=13), now), 13)
         self.assertEqual(elapsed_minutes_since(now + timedelta(minutes=1), now), 0)
 
+    def test_start_unavailable_preserves_reported_charger_state(self):
+        for state, expected in {
+            "busy-non-released": "Start unavailable: Busy (not released)",
+            "busy-blocked": "Start unavailable: Busy (blocked)",
+            "maintenance": "Start unavailable: Maintenance",
+        }.items():
+            with self.subTest(state=state):
+                self.assertEqual(start_readiness({
+                    "State": state, "CanStart": False,
+                    "CanStartReason": "NOT_AVAILABLE",
+                }), expected)
+        self.assertEqual(start_readiness({
+            "CanStart": False, "CanStartReason": "NOT_AVAILABLE",
+        }), "Start unavailable")
+
     def test_apply_cached_last_communication_stores_current_timestamp(self):
         cache = {}
         session = {LAST_COMMUNICATION_TIME: "2026-07-02T09:13:02Z"}

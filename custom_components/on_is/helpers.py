@@ -11,9 +11,32 @@ START_REASON_LABELS = {
     "PAYMENT_NOT_ALLOWED": "Payment not allowed for this account",
     "NO_ELIGIBLE_PAYER": "No eligible ON billing account",
     "PAYER_LOOKUP_FAILED": "Could not check ON billing account",
-    "NOT_AVAILABLE": "Charger unavailable",
+    "NOT_AVAILABLE": "Start unavailable",
     "NO_PAYMENT": "No payment method available",
 }
+
+MONTA_STATE_LABELS = {
+    "available": "Available",
+    "busy": "Busy",
+    "busy-blocked": "Busy (blocked)",
+    "busy-charging": "Charging",
+    "busy-non-charging": "Busy (not charging)",
+    "busy-non-released": "Busy (not released)",
+    "busy-reserved": "Busy (reserved)",
+    "busy-scheduled": "Busy (scheduled)",
+    "error": "Error",
+    "disconnected": "Disconnected",
+    "passive": "Passive",
+    "maintenance": "Maintenance",
+    "other": "Other",
+}
+
+
+def monta_state_label(state: str) -> str:
+    """Display Monta's state without inferring a cause or required action."""
+    return MONTA_STATE_LABELS.get(
+        state, state.replace("-", " ").replace("_", " ").title()
+    )
 
 
 def elapsed_minutes_since(
@@ -39,6 +62,8 @@ def start_readiness(monta: Mapping[str, Any]) -> str:
     if monta.get("CanStart") is True:
         return "Ready to start"
     reason = monta.get("CanStartReason")
+    if reason == "NOT_AVAILABLE" and monta.get("State"):
+        return f"Start unavailable: {monta_state_label(str(monta['State']))}"
     if reason:
         return START_REASON_LABELS.get(str(reason), str(reason).replace("_", " ").title())
     if monta.get("CanStart") is False:

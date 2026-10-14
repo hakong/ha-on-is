@@ -18,6 +18,7 @@ from .const import (
     CONF_REFRESH_TOKEN,
     CONF_REFRESH_TOKEN_EXPIRES_AT,
 )
+from .helpers import monta_state_label
 from .monta.app import (
     APP_CHARGE_POINT_INCLUDES,
     MontaAppClient,
@@ -833,20 +834,21 @@ def _friendly_status(
             if state == "charging":
                 return "Charging"
             if state == "paused":
-                return "Suspended EV"
+                return "Paused"
             if state in {"starting", "reserved", "scheduled"}:
                 return state.replace("_", " ").title()
             if state:
                 return state.replace("_", " ").title()
-    if snapshot.state == "busy-charging":
-        return "Charging"
     if snapshot.state == "busy-non-charging":
         active = _mapping(snapshot.raw.get("active_charge"))
-        return "Busy (paused)" if active.get("state") == "paused" else "Busy (not charging)"
-    if snapshot.cable_plugged_in is True:
+        if active.get("state") == "paused":
+            return "Busy (paused)"
+    if snapshot.state == "available" and snapshot.cable_plugged_in is True:
         return "Preparing"
     if snapshot.state:
-        return snapshot.state.replace("-", " ").replace("_", " ").title()
+        return monta_state_label(snapshot.state)
+    if snapshot.cable_plugged_in is True:
+        return "Preparing"
     return "Unknown"
 
 

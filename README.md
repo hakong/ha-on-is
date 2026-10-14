@@ -16,6 +16,12 @@ Etrel OCEAN client remains in the source only as a compatibility building block.
   failures and Monta's safe error description are retained with the latest
   session. A charger occupied by a session not visible to this ON account is
   shown as busy, but its charge details and controls remain unavailable.
+  Available with a cable attached is shown as Preparing, matching the connector
+  state observed in Monta Hub; it does not promise that starting is permitted.
+  Other reported charge-point states take precedence over the cable-only fallback:
+  `busy-non-released` is shown as Busy (not released), without assuming why it
+  has not been released. The Status sensor retains the raw `monta_state`
+  attribute; cable connection and start eligibility are separate signals.
 * **Live monitoring:** Power, session energy, session cost, price and duration.
 * **Connection detail:** Separate cable-connected and cloud-connected binary
   sensors. Charger Last Connected to Monta records the charger's last reported
